@@ -31,10 +31,11 @@ export async function setRunning(
   docId: string,
   bytesTotal: number
 ): Promise<void> {
+  const startedAt = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => ({
     ...doc,
     status: 'running',
-    started_at: new Date().toISOString(),
+    started_at: startedAt,
     bytes_total: bytesTotal,
   }))
 }
@@ -43,10 +44,11 @@ export async function setCompleted(
   stackClient: StackClient,
   docId: string
 ): Promise<void> {
+  const finishedAt = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => ({
     ...doc,
     status: 'completed',
-    finished_at: new Date().toISOString(),
+    finished_at: finishedAt,
   }))
 }
 
@@ -55,10 +57,11 @@ export async function setFailed(
   docId: string,
   errorMessage: string
 ): Promise<void> {
+  const finishedAt = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => ({
     ...doc,
     status: 'failed',
-    finished_at: new Date().toISOString(),
+    finished_at: finishedAt,
     errors: [...doc.errors, { path: '', message: errorMessage }],
   }))
 }

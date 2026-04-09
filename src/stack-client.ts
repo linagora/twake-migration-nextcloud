@@ -15,6 +15,12 @@ export interface StackClient {
   updateTrackingDoc(doc: TrackingDoc): Promise<TrackingDoc>
 }
 
+const MIGRATIONS_DOCTYPE = 'io.cozy.nextcloud.migrations'
+
+function stripLeadingSlash(path: string): string {
+  return path.startsWith('/') ? path.slice(1) : path
+}
+
 export function createStackClient(
   workplaceFqdn: string,
   initialToken: string,
@@ -53,17 +59,15 @@ export function createStackClient(
 
   return {
     async listNextcloudDir(accountId: string, path: string): Promise<NextcloudEntry[]> {
-      const normalizedPath = path.startsWith('/') ? path.slice(1) : path
-      const response = await request(`/remote/nextcloud/${accountId}/${normalizedPath}`)
+      const response = await request(`/remote/nextcloud/${accountId}/${stripLeadingSlash(path)}`)
       const body = await response.text()
       assertOk(response, body)
       return JSON.parse(body) as NextcloudEntry[]
     },
 
     async transferFile(accountId: string, ncPath: string, cozyDirId: string): Promise<CozyFile> {
-      const normalizedPath = ncPath.startsWith('/') ? ncPath.slice(1) : ncPath
       const response = await request(
-        `/remote/nextcloud/${accountId}/downstream/${normalizedPath}?To=${cozyDirId}&Copy=true`,
+        `/remote/nextcloud/${accountId}/downstream/${stripLeadingSlash(ncPath)}?To=${cozyDirId}&Copy=true`,
         { method: 'POST' }
       )
       const body = await response.text()
@@ -78,12 +82,12 @@ export function createStackClient(
       )
       const body = await response.text()
       if (response.status === 409) {
-        const parsed = JSON.parse(body) as { errors: Array<{ source: { id: string } }> }
-        return parsed.errors[0].source.id
+        const conflict = JSON.parse(body) as { errors: Array<{ source: { id: string } }> }
+        return conflict.errors[0].source.id
       }
       assertOk(response, body)
-      const parsed = JSON.parse(body) as { data: { id: string } }
-      return parsed.data.id
+      const created = JSON.parse(body) as { data: { id: string } }
+      return created.data.id
     },
 
     async getDiskUsage(): Promise<DiskUsage> {
@@ -98,7 +102,7 @@ export function createStackClient(
     },
 
     async getTrackingDoc(id: string): Promise<TrackingDoc> {
-      const response = await request(`/data/io.cozy.nextcloud.migrations/${id}`)
+      const response = await request(`/data/${MIGRATIONS_DOCTYPE}/${id}`)
       const body = await response.text()
       assertOk(response, body)
       return JSON.parse(body) as TrackingDoc
@@ -106,7 +110,7 @@ export function createStackClient(
 
     async updateTrackingDoc(doc: TrackingDoc): Promise<TrackingDoc> {
       const response = await request(
-        `/data/io.cozy.nextcloud.migrations/${doc._id}`,
+        `/data/${MIGRATIONS_DOCTYPE}/${doc._id}`,
         {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },

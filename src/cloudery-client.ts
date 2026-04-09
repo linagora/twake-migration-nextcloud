@@ -30,7 +30,7 @@ export function createClouderyClient(
       if (!response.ok) {
         const body = await response.text()
         logger.error({
-          event: 'cloudery.token.failed',
+          event: 'cloudery.token_failed',
           instance: workplaceFqdn,
           status: response.status,
           duration_ms: Date.now() - start,
@@ -42,12 +42,6 @@ export function createClouderyClient(
       }
 
       const data = (await response.json()) as { token: string }
-      logger.debug({
-        event: 'cloudery.token.acquired',
-        instance: workplaceFqdn,
-        status: response.status,
-        duration_ms: Date.now() - start,
-      }, 'Cloudery token acquired')
       return data.token
     },
   }

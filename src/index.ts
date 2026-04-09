@@ -11,7 +11,10 @@ const QUEUE = 'migration.nextcloud.commands'
 
 async function main(): Promise<void> {
   const config = loadConfig()
-  const logger = pino({ level: config.logLevel })
+  const logger = pino({
+    level: config.logLevel,
+    base: { service: 'twake-nextcloud-migration' },
+  })
 
   logger.info({ event: 'service.starting' }, 'Starting Nextcloud migration service')
 

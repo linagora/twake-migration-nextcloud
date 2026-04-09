@@ -38,8 +38,10 @@ async function main(): Promise<void> {
   )
   logger.info({ exchange: EXCHANGE, queue: QUEUE, routingKey: ROUTING_KEY }, 'Subscribed to migration queue')
 
-  // Graceful shutdown
+  let shuttingDown = false
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return
+    shuttingDown = true
     logger.info({ signal }, 'Shutting down')
     await rabbitClient.close()
     logger.info('RabbitMQ connection closed')

@@ -5,6 +5,14 @@ import { runMigration } from './migration.js'
 import { setFailed } from './tracking.js'
 import type { MigrationCommand, Config } from './types.js'
 
+/**
+ * Shallow estimate of source size from root-level file listing only.
+ * Used as a pre-flight quota check before starting the migration.
+ * @param stackClient - Stack API client
+ * @param accountId - Nextcloud account ID
+ * @param path - Nextcloud directory path to list
+ * @returns Total bytes of files in the listed directory (not recursive)
+ */
 async function estimateSourceSize(
   stackClient: StackClient,
   accountId: string,

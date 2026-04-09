@@ -105,6 +105,9 @@ export interface LocalProgress {
   skipped: TrackingSkipped[]
 }
 
+/**
+ * @returns A zeroed LocalProgress with empty arrays, ready to accumulate deltas.
+ */
 export function emptyLocalProgress(): LocalProgress {
   return { bytesImported: 0, filesImported: 0, errors: [], skipped: [] }
 }

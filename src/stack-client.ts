@@ -9,11 +9,17 @@ import type {
 } from './types.js'
 
 export interface StackClient {
+  /** Lists files and directories in a Nextcloud path via the Stack's WebDAV proxy. */
   listNextcloudDir(accountId: string, path: string): Promise<NextcloudEntry[]>
+  /** Transfers a file from Nextcloud into a Cozy directory (copy, fail on conflict). */
   transferFile(accountId: string, ncPath: string, cozyDirId: string): Promise<CozyFile>
+  /** Creates a directory in Cozy VFS. Returns existing dir ID on 409. */
   createDir(parentDirId: string, name: string): Promise<string>
+  /** Returns disk usage and quota for the Cozy instance. */
   getDiskUsage(): Promise<DiskUsage>
+  /** Fetches a tracking document by ID from CouchDB. */
   getTrackingDoc(id: string): Promise<TrackingDoc>
+  /** Updates a tracking document in CouchDB. Returns the doc with updated _rev. */
   updateTrackingDoc(doc: TrackingDoc): Promise<TrackingDoc>
 }
 

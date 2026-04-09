@@ -15,6 +15,10 @@ const COZY_ROOT_DIR_ID = 'io.cozy.files.root-dir'
 const TARGET_DIR_NAME = 'Nextcloud'
 const DEFAULT_FLUSH_INTERVAL = 50
 
+/**
+ * @param error - Caught error value
+ * @returns The error message string, or String(error) for non-Error values
+ */
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -49,6 +53,14 @@ async function flush(ctx: MigrationContext): Promise<void> {
   ctx.filesSinceFlush = 0
 }
 
+/**
+ * Recursively lists and transfers files from a Nextcloud directory into Cozy.
+ * Accumulates progress locally; flushes to CouchDB every ctx.flushInterval files.
+ * @param accountId - Nextcloud account ID (io.cozy.accounts)
+ * @param ncPath - Nextcloud directory path to list
+ * @param cozyDirId - Target Cozy directory ID
+ * @param ctx - Migration context carrying state, clients, and logger
+ */
 async function traverseDir(
   accountId: string,
   ncPath: string,

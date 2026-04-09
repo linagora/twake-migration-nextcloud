@@ -1,6 +1,6 @@
 # Nextcloud Migration Service
 
-Migrates a user's entire Nextcloud file tree into their Cozy instance. Runs as a standalone RabbitMQ consumer — no web server, no database.
+Migrates a user's entire Nextcloud file tree into their Cozy instance. Runs as a standalone RabbitMQ consumer.
 
 ## How it works
 

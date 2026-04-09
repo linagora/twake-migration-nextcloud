@@ -1,0 +1,121 @@
+import type { ClouderyClient } from './cloudery-client.js'
+import type {
+  NextcloudEntry,
+  CozyFile,
+  DiskUsage,
+  TrackingDoc,
+} from './types.js'
+
+export interface StackClient {
+  listNextcloudDir(accountId: string, path: string): Promise<NextcloudEntry[]>
+  transferFile(accountId: string, ncPath: string, cozyDirId: string): Promise<CozyFile>
+  createDir(parentDirId: string, name: string): Promise<string>
+  getDiskUsage(): Promise<DiskUsage>
+  getTrackingDoc(id: string): Promise<TrackingDoc>
+  updateTrackingDoc(doc: TrackingDoc): Promise<TrackingDoc>
+}
+
+export function createStackClient(
+  workplaceFqdn: string,
+  initialToken: string,
+  clouderyClient: ClouderyClient
+): StackClient {
+  const baseUrl = `https://${workplaceFqdn}`
+  let token = initialToken
+
+  async function request(path: string, options: RequestInit = {}): Promise<Response> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      ...(options.headers as Record<string, string> ?? {}),
+    }
+
+    const response = await fetch(`${baseUrl}${path}`, { ...options, headers })
+
+    if (response.status === 401) {
+      token = await clouderyClient.getToken(workplaceFqdn)
+      const retryHeaders = { ...headers, Authorization: `Bearer ${token}` }
+      const retry = await fetch(`${baseUrl}${path}`, { ...options, headers: retryHeaders })
+      if (!retry.ok) {
+        const body = await retry.text()
+        throw new Error(`Stack request failed after token refresh (${retry.status}): ${body}`)
+      }
+      return retry
+    }
+
+    return response
+  }
+
+  function assertOk(response: Response, body: string): void {
+    if (!response.ok) {
+      throw new Error(`Stack request failed (${response.status}): ${body}`)
+    }
+  }
+
+  return {
+    async listNextcloudDir(accountId: string, path: string): Promise<NextcloudEntry[]> {
+      const normalizedPath = path.startsWith('/') ? path.slice(1) : path
+      const response = await request(`/remote/nextcloud/${accountId}/${normalizedPath}`)
+      const body = await response.text()
+      assertOk(response, body)
+      return JSON.parse(body) as NextcloudEntry[]
+    },
+
+    async transferFile(accountId: string, ncPath: string, cozyDirId: string): Promise<CozyFile> {
+      const normalizedPath = ncPath.startsWith('/') ? ncPath.slice(1) : ncPath
+      const response = await request(
+        `/remote/nextcloud/${accountId}/downstream/${normalizedPath}?To=${cozyDirId}&Copy=true`,
+        { method: 'POST' }
+      )
+      const body = await response.text()
+      assertOk(response, body)
+      return JSON.parse(body) as CozyFile
+    },
+
+    async createDir(parentDirId: string, name: string): Promise<string> {
+      const response = await request(
+        `/files/${parentDirId}?Name=${name}&Type=directory`,
+        { method: 'POST' }
+      )
+      const body = await response.text()
+      if (response.status === 409) {
+        const parsed = JSON.parse(body) as { errors: Array<{ source: { id: string } }> }
+        return parsed.errors[0].source.id
+      }
+      assertOk(response, body)
+      const parsed = JSON.parse(body) as { data: { id: string } }
+      return parsed.data.id
+    },
+
+    async getDiskUsage(): Promise<DiskUsage> {
+      const response = await request('/settings/disk-usage')
+      const body = await response.text()
+      assertOk(response, body)
+      const parsed = JSON.parse(body) as { data: { attributes: { used: string; quota: string } } }
+      return {
+        used: parseInt(parsed.data.attributes.used, 10),
+        quota: parseInt(parsed.data.attributes.quota, 10),
+      }
+    },
+
+    async getTrackingDoc(id: string): Promise<TrackingDoc> {
+      const response = await request(`/data/io.cozy.nextcloud.migrations/${id}`)
+      const body = await response.text()
+      assertOk(response, body)
+      return JSON.parse(body) as TrackingDoc
+    },
+
+    async updateTrackingDoc(doc: TrackingDoc): Promise<TrackingDoc> {
+      const response = await request(
+        `/data/io.cozy.nextcloud.migrations/${doc._id}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(doc),
+        }
+      )
+      const body = await response.text()
+      assertOk(response, body)
+      return JSON.parse(body) as TrackingDoc
+    },
+  }
+}

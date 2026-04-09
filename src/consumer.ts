@@ -3,7 +3,7 @@ import type { ClouderyClient } from './cloudery-client.js'
 import { createStackClient, type StackClient } from './stack-client.js'
 import { runMigration } from './migration.js'
 import { setFailed } from './tracking.js'
-import type { MigrationCommand } from './types.js'
+import type { MigrationCommand, Config } from './types.js'
 
 async function estimateSourceSize(
   stackClient: StackClient,
@@ -28,11 +28,13 @@ async function estimateSourceSize(
  * @param command - Validated migration command
  * @param clouderyClient - Client for obtaining Stack tokens
  * @param logger - Pino logger instance
+ * @param config - Service configuration
  */
 export async function handleMigrationMessage(
   command: MigrationCommand,
   clouderyClient: ClouderyClient,
-  logger: Logger
+  logger: Logger,
+  config: Config
 ): Promise<void> {
   const migrationLogger = logger.child({
     migration_id: command.migrationId,
@@ -86,7 +88,7 @@ export async function handleMigrationMessage(
     used: diskUsage.used,
   }, 'Validation passed, firing migration')
 
-  runMigration(command, stackClient, logger).catch((error) => {
+  runMigration(command, stackClient, logger, config.flushInterval).catch((error) => {
     migrationLogger.error({
       event: 'consumer.migration_unhandled_error',
       error,

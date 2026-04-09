@@ -91,4 +91,5 @@ export interface Config {
   clouderyUrl: string
   clouderyToken: string
   logLevel: string
+  flushInterval: number
 }

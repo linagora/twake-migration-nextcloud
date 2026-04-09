@@ -12,7 +12,7 @@ import {
 
 const COZY_ROOT_DIR_ID = 'io.cozy.files.root-dir'
 const TARGET_DIR_NAME = 'Nextcloud'
-const FLUSH_EVERY_N_FILES = 50
+const DEFAULT_FLUSH_INTERVAL = 50
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -32,6 +32,7 @@ interface MigrationContext {
   totalErrors: number
   totalSkipped: number
   filesSinceFlush: number
+  flushInterval: number
   startedAt: number
 }
 
@@ -106,7 +107,7 @@ async function traverseDir(
           elapsed_ms: Date.now() - ctx.startedAt,
         }, 'File transferred')
 
-        if (ctx.filesSinceFlush >= FLUSH_EVERY_N_FILES) {
+        if (ctx.filesSinceFlush >= ctx.flushInterval) {
           await flush(ctx)
         }
       } catch (error) {
@@ -146,11 +147,13 @@ async function traverseDir(
  * @param command - Migration command from RabbitMQ
  * @param stackClient - Authenticated Stack API client
  * @param logger - Pino logger instance
+ * @param flushInterval - Flush progress to CouchDB every N files (default: 50)
  */
 export async function runMigration(
   command: MigrationCommand,
   stackClient: StackClient,
-  logger: Logger
+  logger: Logger,
+  flushInterval: number = DEFAULT_FLUSH_INTERVAL
 ): Promise<void> {
   const migrationLogger = logger.child({
     migration_id: command.migrationId,
@@ -168,6 +171,7 @@ export async function runMigration(
     totalErrors: 0,
     totalSkipped: 0,
     filesSinceFlush: 0,
+    flushInterval,
     startedAt: Date.now(),
   }
 

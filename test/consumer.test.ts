@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { handleMigrationMessage } from '../src/consumer.js'
 import type { ClouderyClient } from '../src/cloudery-client.js'
 import type { StackClient } from '../src/stack-client.js'
-import type { MigrationCommand, TrackingDoc } from '../src/types.js'
+import type { MigrationCommand, TrackingDoc, Config } from '../src/types.js'
 import type { Logger } from 'pino'
 
 // Mock the migration module so runMigration doesn't actually execute
@@ -22,6 +22,14 @@ const logger = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   child: vi.fn().mockReturnThis(),
 } as unknown as Logger
+
+const config: Config = {
+  rabbitmqUrl: 'amqp://localhost',
+  clouderyUrl: 'https://manager.cozycloud.cc',
+  clouderyToken: 'secret',
+  logLevel: 'info',
+  flushInterval: 50,
+}
 
 function makeCommand(overrides: Partial<MigrationCommand> = {}): MigrationCommand {
   return {
@@ -75,12 +83,12 @@ describe('handleMigrationMessage', () => {
   it('fetches token, validates, and fires migration', async () => {
     const command = makeCommand()
 
-    await handleMigrationMessage(command, mockCloudery, logger)
+    await handleMigrationMessage(command, mockCloudery, logger, config)
 
     expect(mockCloudery.getToken).toHaveBeenCalledWith('alice.cozy.example')
     expect(createStackClient).toHaveBeenCalledWith('alice.cozy.example', 'jwt-token', mockCloudery, expect.anything())
     expect(mockStack.getTrackingDoc).toHaveBeenCalledWith('mig-1')
-    expect(runMigration).toHaveBeenCalledWith(command, mockStack, logger)
+    expect(runMigration).toHaveBeenCalledWith(command, mockStack, logger, config.flushInterval)
   })
 
   it('skips migration if status is completed', async () => {
@@ -91,7 +99,7 @@ describe('handleMigrationMessage', () => {
       finished_at: '2024-01-01T00:01:00.000Z',
     }))
 
-    await handleMigrationMessage(makeCommand(), mockCloudery, logger)
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
 
     expect(runMigration).not.toHaveBeenCalled()
   })
@@ -103,7 +111,7 @@ describe('handleMigrationMessage', () => {
       started_at: '2024-01-01T00:00:00.000Z',
     }))
 
-    await handleMigrationMessage(makeCommand(), mockCloudery, logger)
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
 
     expect(runMigration).not.toHaveBeenCalled()
   })
@@ -117,7 +125,7 @@ describe('handleMigrationMessage', () => {
       finished_at: '2024-01-01T00:01:00.000Z',
     }))
 
-    await handleMigrationMessage(makeCommand(), mockCloudery, logger)
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
 
     expect(runMigration).toHaveBeenCalled()
   })
@@ -129,7 +137,7 @@ describe('handleMigrationMessage', () => {
       { type: 'file', name: 'large.zip', path: '/large.zip', size: 50000, mime: 'application/zip' },
     ])
 
-    await handleMigrationMessage(makeCommand(), mockCloudery, logger)
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
 
     expect(runMigration).not.toHaveBeenCalled()
     const failedUpdate = vi.mocked(mockStack.updateTrackingDoc).mock.calls
@@ -144,7 +152,7 @@ describe('handleMigrationMessage', () => {
       { type: 'file', name: 'huge.iso', path: '/huge.iso', size: 999999, mime: 'application/octet-stream' },
     ])
 
-    await handleMigrationMessage(makeCommand(), mockCloudery, logger)
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
 
     expect(runMigration).toHaveBeenCalled()
   })
@@ -155,7 +163,7 @@ describe('handleMigrationMessage', () => {
     )
 
     await expect(
-      handleMigrationMessage(makeCommand(), mockCloudery, logger)
+      handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
     ).rejects.toThrow('503')
   })
 })

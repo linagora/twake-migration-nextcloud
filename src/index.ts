@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     QUEUE,
     async (msg: RabbitMQMessage) => {
       const command = parseMigrationCommand(msg)
-      await handleMigrationMessage(command, clouderyClient, logger)
+      await handleMigrationMessage(command, clouderyClient, logger, config)
     }
   )
   logger.info({

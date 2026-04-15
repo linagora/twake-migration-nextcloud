@@ -13,7 +13,7 @@ import {
 
 const COZY_ROOT_DIR_ID = 'io.cozy.files.root-dir'
 const TARGET_DIR_NAME = 'Nextcloud'
-const DEFAULT_FLUSH_INTERVAL = 50
+const DEFAULT_FLUSH_INTERVAL = 25
 
 /**
  * @param error - Caught error value
@@ -166,7 +166,7 @@ async function traverseDir(
  *   path (from the Stack's `/remote/nextcloud/:account/size/*path` route).
  *   Seeded once via setRunning; see {@link flushProgress} for why it must
  *   not be rewritten later.
- * @param flushInterval - Flush progress to CouchDB every N files (default: 50)
+ * @param flushInterval - Flush progress to CouchDB every N files (default: 25)
  */
 export async function runMigration(
   command: MigrationCommand,

@@ -26,7 +26,7 @@ describe('loadConfig', () => {
       clouderyUrl: 'https://manager.cozycloud.cc',
       clouderyToken: 'secret-token',
       logLevel: 'info',
-      flushInterval: 50,
+      flushInterval: 25,
       stackUrlScheme: 'https',
     })
   })

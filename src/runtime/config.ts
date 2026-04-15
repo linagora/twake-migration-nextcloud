@@ -35,7 +35,7 @@ export function loadConfig(): Config {
     clouderyUrl: requireEnv('CLOUDERY_URL'),
     clouderyToken: requireEnv('CLOUDERY_TOKEN'),
     logLevel: process.env.LOG_LEVEL ?? 'info',
-    flushInterval: parseInt(process.env.FLUSH_INTERVAL ?? '50', 10),
+    flushInterval: parseInt(process.env.FLUSH_INTERVAL ?? '25', 10),
     stackUrlScheme: rawScheme,
   }
 }

@@ -29,7 +29,7 @@ const config: Config = {
   clouderyUrl: 'https://manager.cozycloud.cc',
   clouderyToken: 'secret',
   logLevel: 'info',
-  flushInterval: 50,
+  flushInterval: 25,
   stackUrlScheme: 'https',
 }
 

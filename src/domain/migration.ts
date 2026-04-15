@@ -48,7 +48,7 @@ async function flush(ctx: MigrationContext): Promise<void> {
   if (ctx.filesSinceFlush === 0 && ctx.pending.errors.length === 0 && ctx.pending.skipped.length === 0) {
     return
   }
-  await flushProgress(ctx.stackClient, ctx.command.migrationId, ctx.pending, ctx.discovered)
+  await flushProgress(ctx.stackClient, ctx.command.migrationId, ctx.pending, ctx.discovered.filesTotal)
   ctx.pending = emptyLocalProgress()
   ctx.filesSinceFlush = 0
 }
@@ -153,12 +153,18 @@ async function traverseDir(
  * @param command - Migration command from RabbitMQ
  * @param stackClient - Authenticated Stack API client
  * @param logger - Pino logger instance
+ * @param bytesTotal - Authoritative recursive byte total for the source
+ *   path, obtained from the Stack's `/remote/nextcloud/:account/size/*path`
+ *   endpoint. Written once to the tracking document at the start of the
+ *   migration so a frontend can render a stable progress bar from
+ *   `bytes_imported / bytes_total`.
  * @param flushInterval - Flush progress to CouchDB every N files (default: 50)
  */
 export async function runMigration(
   command: MigrationCommand,
   stackClient: StackClient,
   logger: Logger,
+  bytesTotal: number,
   flushInterval: number = DEFAULT_FLUSH_INTERVAL
 ): Promise<void> {
   const migrationLogger = logger.child({
@@ -184,7 +190,7 @@ export async function runMigration(
   try {
     migrationLogger.info({ event: 'migration.started' }, 'Migration started')
 
-    await setRunning(stackClient, command.migrationId, 0)
+    await setRunning(stackClient, command.migrationId, bytesTotal)
     const targetDirId = await stackClient.createDir(COZY_ROOT_DIR_ID, TARGET_DIR_NAME)
     await traverseDir(command.accountId, command.sourcePath || '/', targetDirId, ctx)
     await flush(ctx)

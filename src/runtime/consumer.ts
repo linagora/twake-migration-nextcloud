@@ -86,7 +86,7 @@ export async function handleMigrationMessage(
     used: diskUsage.used,
   }, 'Validation passed, firing migration')
 
-  runMigration(command, stackClient, logger, config.flushInterval).catch((error) => {
+  runMigration(command, stackClient, logger, sourceSize, config.flushInterval).catch((error) => {
     migrationLogger.error({
       event: 'consumer.migration_unhandled_error',
       error,

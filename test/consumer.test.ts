@@ -85,13 +85,17 @@ describe('handleMigrationMessage', () => {
 
   it('fetches token, validates, and fires migration', async () => {
     const command = makeCommand()
+    // Small enough to pass the quota check (used 1000 + 12345 < quota 100000).
+    vi.mocked(mockStack.getNextcloudSize).mockResolvedValueOnce(12345)
 
     await handleMigrationMessage(command, mockCloudery, logger, config)
 
     expect(mockCloudery.getToken).toHaveBeenCalledWith('alice.cozy.example')
     expect(createStackClient).toHaveBeenCalledWith('alice.cozy.example', 'https', 'jwt-token', mockCloudery, expect.anything())
     expect(mockStack.getTrackingDoc).toHaveBeenCalledWith('mig-1')
-    expect(runMigration).toHaveBeenCalledWith(command, mockStack, logger, config.flushInterval)
+    // The pre-flight size from getNextcloudSize is forwarded to runMigration
+    // so setRunning can seed bytes_total for the UI's progress bar.
+    expect(runMigration).toHaveBeenCalledWith(command, mockStack, logger, 12345, config.flushInterval)
   })
 
   it('skips migration if status is completed', async () => {

@@ -10,11 +10,28 @@ export interface MigrationCommand {
 export interface TrackingDoc {
   _id: string
   _rev?: string
+  /**
+   * Schema version stamped on every write, so future consumers can
+   * evolve the shape without guessing which fields exist. Bump when
+   * the shape changes incompatibly.
+   */
+  schema_version?: number
   status: 'pending' | 'running' | 'completed' | 'failed'
   target_dir: string
   progress: TrackingProgress
+  /** Per-file errors, capped at {@link MAX_ERRORS_CAP}. */
   errors: TrackingError[]
+  /**
+   * Number of per-file errors that were dropped to stay within the
+   * cap. Added rather than resizing the doc unbounded: a wide
+   * migration with many failures would otherwise grow the doc past
+   * CouchDB's per-document limit.
+   */
+  errors_truncated_count?: number
+  /** Files skipped (typically via 409 on resume), capped at {@link MAX_SKIPPED_CAP}. */
   skipped: TrackingSkipped[]
+  /** Number of skipped entries dropped to stay within the cap. */
+  skipped_truncated_count?: number
   started_at: string | null
   finished_at: string | null
   /**
@@ -25,6 +42,15 @@ export interface TrackingDoc {
    * docs written before the field existed.
    */
   last_heartbeat_at?: string | null
+  /**
+   * Human-readable reason a migration is in `failed` status. Distinct
+   * from the per-file `errors` array, which is only meant to list
+   * individual files that could not be transferred. Dual-written
+   * alongside the legacy `{ path: '', message, at }` sentinel in
+   * `errors` for back-compat with frontends still reading the old
+   * shape; new consumers should prefer this field.
+   */
+  failure_reason?: string | null
 }
 
 export interface TrackingProgress {

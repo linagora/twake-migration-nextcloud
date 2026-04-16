@@ -3,6 +3,19 @@ import type { TrackingDoc, TrackingError, TrackingSkipped } from './types.js'
 
 const MAX_CONFLICT_RETRIES = 5
 
+/** Current schema version stamped on every write. */
+export const TRACKING_SCHEMA_VERSION = 1
+
+/**
+ * Maximum number of entries we keep in the `errors` and `skipped`
+ * arrays. Per-file noise on a large migration can otherwise grow the
+ * tracking doc past CouchDB's document-size ceiling. Overflow is
+ * counted in the sibling `*_truncated_count` fields so consumers can
+ * still show a total while displaying only the most recent entries.
+ */
+export const MAX_ERRORS_CAP = 1000
+export const MAX_SKIPPED_CAP = 1000
+
 /**
  * Age after which a `running` tracking doc is considered a zombie from
  * a crashed consumer rather than an in-flight migration. Chosen
@@ -104,6 +117,7 @@ export async function setRunning(
     }
     return {
       ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
       status: 'running',
       started_at: doc.started_at ?? now,
       last_heartbeat_at: now,
@@ -130,7 +144,12 @@ export async function setCompleted(
     if (doc.status === 'failed') {
       throw new IllegalStatusTransitionError(doc.status, 'completed')
     }
-    return { ...doc, status: 'completed', finished_at: finishedAt }
+    return {
+      ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
+      status: 'completed',
+      finished_at: finishedAt,
+    }
   })
 }
 
@@ -151,11 +170,23 @@ export async function setFailed(
     if (doc.status === 'completed') {
       throw new IllegalStatusTransitionError(doc.status, 'failed')
     }
+    // Dual-write: legacy sentinel in errors[] for back-compat with
+    // frontends that parse that array, plus the new top-level
+    // failure_reason for new consumers.
+    const errors = appendFailureSentinel(
+      doc.errors,
+      errorMessage,
+      now,
+      doc.errors_truncated_count ?? 0,
+    )
     return {
       ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
       status: 'failed',
       finished_at: now,
-      errors: [...doc.errors, { path: '', message: errorMessage, at: now }],
+      failure_reason: errorMessage,
+      errors: errors.items,
+      errors_truncated_count: errors.truncated,
     }
   })
 }
@@ -200,6 +231,7 @@ export async function flushProgress(
   const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => ({
     ...doc,
+    schema_version: TRACKING_SCHEMA_VERSION,
     last_heartbeat_at: now,
     ...mergeLocalProgress(doc, local, filesDiscovered),
   }))
@@ -235,6 +267,7 @@ export async function flushAndComplete(
     }
     return {
       ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
       status: 'completed',
       finished_at: now,
       last_heartbeat_at: now,
@@ -273,13 +306,25 @@ export async function flushAndFail(
       throw new IllegalStatusTransitionError(doc.status, 'failed')
     }
     const merged = mergeLocalProgress(doc, local, filesDiscovered)
+    // Dual-write: append the legacy sentinel to errors[] for back-
+    // compat and set the new top-level `failure_reason`. The sentinel
+    // still goes through the cap so the final write honors it.
+    const withSentinel = appendFailureSentinel(
+      merged.errors,
+      errorMessage,
+      now,
+      merged.errors_truncated_count,
+    )
     return {
       ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
       status: 'failed',
       finished_at: now,
       last_heartbeat_at: now,
+      failure_reason: errorMessage,
       ...merged,
-      errors: [...merged.errors, { path: '', message: errorMessage, at: now }],
+      errors: withSentinel.items,
+      errors_truncated_count: withSentinel.truncated,
     }
   })
 }
@@ -288,16 +333,26 @@ export async function flushAndFail(
  * Shared merger for the flush + terminal writes: adds local deltas to
  * the remote progress counters (never rewriting `bytes_total`),
  * advances `files_total` monotonically, and concatenates per-file
- * errors and skips. The max on `files_total` matters because a
- * resumed migration restarts its discovery counter at 0; overwriting
- * blindly would regress the UI's progress denominator back to zero
- * on every resumed run.
+ * errors and skips while capping each array at its maximum. The max
+ * on `files_total` matters because a resumed migration restarts its
+ * discovery counter at 0; overwriting blindly would regress the UI's
+ * progress denominator back to zero on every resumed run.
  */
+interface MergedProgress {
+  progress: TrackingDoc['progress']
+  errors: TrackingError[]
+  errors_truncated_count: number
+  skipped: TrackingSkipped[]
+  skipped_truncated_count: number
+}
+
 function mergeLocalProgress(
   doc: TrackingDoc,
   local: LocalProgress,
   filesDiscovered: number,
-): Pick<TrackingDoc, 'progress' | 'errors' | 'skipped'> {
+): MergedProgress {
+  const capped = capTail(doc.errors, local.errors, MAX_ERRORS_CAP, doc.errors_truncated_count ?? 0)
+  const cappedSkipped = capTail(doc.skipped, local.skipped, MAX_SKIPPED_CAP, doc.skipped_truncated_count ?? 0)
   return {
     progress: {
       ...doc.progress,
@@ -305,7 +360,48 @@ function mergeLocalProgress(
       files_imported: doc.progress.files_imported + local.filesImported,
       files_total: Math.max(doc.progress.files_total, filesDiscovered),
     },
-    errors: [...doc.errors, ...local.errors],
-    skipped: [...doc.skipped, ...local.skipped],
+    errors: capped.items,
+    errors_truncated_count: capped.truncated,
+    skipped: cappedSkipped.items,
+    skipped_truncated_count: cappedSkipped.truncated,
   }
+}
+
+/**
+ * Appends the migration-level failure sentinel `{ path: '', message,
+ * at }` to the errors array and applies the cap. Shared between
+ * setFailed (no per-file deltas) and flushAndFail (final flush plus
+ * terminal transition).
+ */
+function appendFailureSentinel(
+  existing: TrackingError[],
+  errorMessage: string,
+  now: string,
+  existingTruncated: number,
+): { items: TrackingError[]; truncated: number } {
+  return capTail(
+    existing,
+    [{ path: '', message: errorMessage, at: now }],
+    MAX_ERRORS_CAP,
+    existingTruncated,
+  )
+}
+
+/**
+ * Concatenates `additions` onto `existing`, truncating from the front
+ * (dropping the oldest) when the total exceeds `cap`. Returns the
+ * kept tail and the cumulative dropped count (including the previous
+ * `existingTruncated`) so callers can advance the counter across
+ * repeated flushes.
+ */
+function capTail<T>(
+  existing: T[],
+  additions: T[],
+  cap: number,
+  existingTruncated: number,
+): { items: T[]; truncated: number } {
+  const all = existing.concat(additions)
+  if (all.length <= cap) return { items: all, truncated: existingTruncated }
+  const overflow = all.length - cap
+  return { items: all.slice(overflow), truncated: existingTruncated + overflow }
 }

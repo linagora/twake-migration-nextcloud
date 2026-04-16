@@ -112,16 +112,34 @@ describe('handleMigrationMessage', () => {
     expect(runMigration).not.toHaveBeenCalled()
   })
 
-  it('skips migration if status is running', async () => {
+  it('skips migration if status is running and heartbeat is fresh', async () => {
     vi.mocked(mockStack.getTrackingDoc).mockResolvedValueOnce(makePendingDoc({
       status: 'running',
       progress: { files_imported: 5, files_total: 10, bytes_imported: 2000, bytes_total: 5000 },
-      started_at: '2024-01-01T00:00:00.000Z',
+      started_at: new Date().toISOString(),
+      last_heartbeat_at: new Date().toISOString(),
     }))
 
     await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
 
     expect(runMigration).not.toHaveBeenCalled()
+  })
+
+  it('resumes a running migration whose heartbeat is stale', async () => {
+    // Heartbeat well older than STALE_HEARTBEAT_MS (30 min) means the
+    // previous consumer crashed; the 409-on-existing skip logic makes
+    // resume idempotent, so we pick it up.
+    const old = new Date(Date.now() - 60 * 60_000).toISOString()
+    vi.mocked(mockStack.getTrackingDoc).mockResolvedValueOnce(makePendingDoc({
+      status: 'running',
+      progress: { files_imported: 5, files_total: 10, bytes_imported: 2000, bytes_total: 5000 },
+      started_at: old,
+      last_heartbeat_at: old,
+    }))
+
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config)
+
+    expect(runMigration).toHaveBeenCalled()
   })
 
   it('proceeds if status is failed (retry scenario)', async () => {

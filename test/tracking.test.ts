@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   updateTracking,
   setRunning,
@@ -6,6 +6,8 @@ import {
   setFailed,
   flushProgress,
   isConflictError,
+  isStaleRunning,
+  STALE_HEARTBEAT_MS,
 } from '../src/domain/tracking.js'
 import type { StackClient } from '../src/clients/stack-client.js'
 import type { TrackingDoc } from '../src/domain/types.js'
@@ -119,14 +121,30 @@ describe('updateTracking', () => {
 })
 
 describe('setRunning', () => {
-  it('sets status, started_at, and progress.bytes_total', async () => {
+  it('sets status, started_at, heartbeat, and progress.bytes_total', async () => {
     const stack = makeMockStack()
     await setRunning(stack, 'mig-1', 5000)
 
     const calledDoc = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
     expect(calledDoc.status).toBe('running')
     expect(calledDoc.started_at).toBeDefined()
+    expect(calledDoc.last_heartbeat_at).toBeDefined()
     expect(calledDoc.progress.bytes_total).toBe(5000)
+  })
+
+  it('preserves the original started_at when resuming a stale migration', async () => {
+    const originalStart = '2024-01-01T00:00:00.000Z'
+    const stack = makeMockStack(makeDoc({
+      status: 'running',
+      started_at: originalStart,
+      last_heartbeat_at: originalStart,
+    }))
+
+    await setRunning(stack, 'mig-1', 5000)
+
+    const calledDoc = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(calledDoc.started_at).toBe(originalStart)
+    expect(calledDoc.last_heartbeat_at).not.toBe(originalStart)
   })
 })
 
@@ -219,5 +237,48 @@ describe('flushProgress', () => {
     // Re-reads doc and reapplies patch
     expect(stack.getTrackingDoc).toHaveBeenCalledTimes(2)
     expect(stack.updateTrackingDoc).toHaveBeenCalledTimes(2)
+  })
+
+  it('stamps last_heartbeat_at on every flush', async () => {
+    const stack = makeMockStack()
+    await flushProgress(stack, 'mig-1', {
+      bytesImported: 1, filesImported: 1, errors: [], skipped: [],
+    }, 1)
+
+    const calledDoc = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(calledDoc.last_heartbeat_at).toBeDefined()
+  })
+})
+
+describe('isStaleRunning', () => {
+  const now = Date.UTC(2024, 5, 1, 12, 0, 0)
+
+  it('returns false for non-running docs', () => {
+    expect(isStaleRunning(makeDoc({ status: 'pending' }), now)).toBe(false)
+    expect(isStaleRunning(makeDoc({ status: 'completed' }), now)).toBe(false)
+    expect(isStaleRunning(makeDoc({ status: 'failed' }), now)).toBe(false)
+  })
+
+  it('returns false when the heartbeat is within the threshold', () => {
+    const recent = new Date(now - STALE_HEARTBEAT_MS + 1).toISOString()
+    const doc = makeDoc({ status: 'running', last_heartbeat_at: recent })
+    expect(isStaleRunning(doc, now)).toBe(false)
+  })
+
+  it('returns true when the heartbeat is older than the threshold', () => {
+    const old = new Date(now - STALE_HEARTBEAT_MS - 1).toISOString()
+    const doc = makeDoc({ status: 'running', last_heartbeat_at: old })
+    expect(isStaleRunning(doc, now)).toBe(true)
+  })
+
+  it('falls back to started_at for docs with no heartbeat field', () => {
+    const old = new Date(now - STALE_HEARTBEAT_MS - 1).toISOString()
+    const doc = makeDoc({ status: 'running', started_at: old })
+    expect(isStaleRunning(doc, now)).toBe(true)
+  })
+
+  it('treats a running doc with no timestamps at all as stale', () => {
+    const doc = makeDoc({ status: 'running', started_at: null })
+    expect(isStaleRunning(doc, now)).toBe(true)
   })
 })

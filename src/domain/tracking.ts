@@ -4,6 +4,30 @@ import type { TrackingDoc, TrackingError, TrackingSkipped } from './types.js'
 const MAX_CONFLICT_RETRIES = 5
 
 /**
+ * Age after which a `running` tracking doc is considered a zombie from
+ * a crashed consumer rather than an in-flight migration. Chosen
+ * comfortably larger than the longest legitimate gap between flushes:
+ * a single file transfer can last up to TRANSFER_TIMEOUT_MS (15 min)
+ * with no heartbeat, so we need room for that plus a safety margin.
+ */
+export const STALE_HEARTBEAT_MS = 30 * 60_000
+
+/**
+ * @param doc - Tracking document
+ * @param now - Override for the current time in ms (tests)
+ * @returns true when `doc.status === 'running'` but the heartbeat is
+ *   older than {@link STALE_HEARTBEAT_MS}. Legacy docs with no
+ *   heartbeat fall back to `started_at`; if that is also missing the
+ *   doc is treated as stale.
+ */
+export function isStaleRunning(doc: TrackingDoc, now: number = Date.now()): boolean {
+  if (doc.status !== 'running') return false
+  const heartbeat = doc.last_heartbeat_at ?? doc.started_at
+  if (!heartbeat) return true
+  return now - Date.parse(heartbeat) > STALE_HEARTBEAT_MS
+}
+
+/**
  * @param error - Caught error value
  * @returns true if the error represents an HTTP/CouchDB 409 conflict
  */
@@ -43,7 +67,10 @@ export async function updateTracking(
 }
 
 /**
- * Transitions the tracking document to "running".
+ * Transitions the tracking document to "running". Preserves any
+ * existing `started_at` (so a resumed stale migration keeps its
+ * original timestamp) and stamps the heartbeat so a fresh consumer
+ * marks the doc actively-running immediately.
  * @param stackClient - Stack API client
  * @param docId - Tracking document ID
  * @param bytesTotal - Initial estimated total bytes (from Nextcloud quota)
@@ -53,11 +80,12 @@ export async function setRunning(
   docId: string,
   bytesTotal: number
 ): Promise<void> {
-  const startedAt = new Date().toISOString()
+  const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => ({
     ...doc,
     status: 'running',
-    started_at: startedAt,
+    started_at: doc.started_at ?? now,
+    last_heartbeat_at: now,
     progress: {
       ...doc.progress,
       bytes_total: bytesTotal,
@@ -139,8 +167,10 @@ export async function flushProgress(
   local: LocalProgress,
   filesDiscovered: number
 ): Promise<void> {
+  const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => ({
     ...doc,
+    last_heartbeat_at: now,
     progress: {
       ...doc.progress,
       bytes_imported: doc.progress.bytes_imported + local.bytesImported,

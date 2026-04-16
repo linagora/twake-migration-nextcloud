@@ -3,7 +3,7 @@ import type { ClouderyClient } from '../clients/cloudery-client.js'
 import { createStackClient, type StackClient } from '../clients/stack-client.js'
 import { runMigration } from '../domain/migration.js'
 import { getErrorMessage } from '../domain/errors.js'
-import { setFailed } from '../domain/tracking.js'
+import { isStaleRunning, setFailed } from '../domain/tracking.js'
 import type { MigrationCommand } from '../domain/types.js'
 import type { Config } from './config.js'
 
@@ -76,12 +76,25 @@ export async function handleMigrationMessage(
     throw error
   }
 
-  if (trackingDoc.status === 'completed' || trackingDoc.status === 'running') {
+  const freshlyRunning =
+    trackingDoc.status === 'running' && !isStaleRunning(trackingDoc)
+  if (trackingDoc.status === 'completed' || freshlyRunning) {
     migrationLogger.info({
       event: 'consumer.skipped_idempotent',
       status: trackingDoc.status,
     }, 'Migration already processed, skipping')
     return
+  }
+  if (trackingDoc.status === 'running') {
+    // Heartbeat is older than the stale threshold: the previous
+    // consumer crashed or was killed mid-migration. The 409-on-existing
+    // skip logic in the traversal makes resume idempotent, so we take
+    // over rather than leaving a zombie doc wedged forever.
+    migrationLogger.warn({
+      event: 'consumer.resuming_stale',
+      last_heartbeat_at: trackingDoc.last_heartbeat_at,
+      started_at: trackingDoc.started_at,
+    }, 'Resuming stale running migration')
   }
 
   // Nextcloud reports the recursive byte total of the source path via

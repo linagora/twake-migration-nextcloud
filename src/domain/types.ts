@@ -17,6 +17,14 @@ export interface TrackingDoc {
   skipped: TrackingSkipped[]
   started_at: string | null
   finished_at: string | null
+  /**
+   * ISO timestamp stamped on every progress flush. Distinguishes an
+   * actively-running migration from a zombie left behind by a crashed
+   * consumer: a `running` doc whose heartbeat is older than the stale
+   * threshold is resumable. Optional for backward compatibility with
+   * docs written before the field existed.
+   */
+  last_heartbeat_at?: string | null
 }
 
 export interface TrackingProgress {

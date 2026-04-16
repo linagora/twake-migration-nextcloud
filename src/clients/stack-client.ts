@@ -1,6 +1,9 @@
 import type { Logger } from 'pino'
-import cozyStackClientPkg from 'cozy-stack-client'
-import type { CozyStackClient as CozyStackClientType } from 'cozy-stack-client'
+import cozyStackClientPkg, {
+  type FileStat,
+  type NextcloudEntryRaw,
+  type TransferredFile,
+} from 'cozy-stack-client'
 import type { ClouderyClient } from './cloudery-client.js'
 import type { TrackingDoc } from '../domain/types.js'
 import { DOCTYPES } from '../domain/doctypes.js'
@@ -56,9 +59,21 @@ export interface DiskUsage {
 // CozyStackClient like a normal constructor. The constructor accepts either
 // an AppToken instance or a raw JWT string, so we pass the string directly
 // and sidestep the missing AppToken export.
-const CozyStackClient = (cozyStackClientPkg as unknown as {
-  default: new (options: { uri: string; token: string }) => CozyStackClientType
-}).default
+const CozyStackClient = cozyStackClientPkg.default
+
+function toCozyDir(stat: FileStat): CozyDir {
+  return { id: stat.data._id, path: stat.data.attributes.path }
+}
+
+function toNextcloudEntry(raw: NextcloudEntryRaw): NextcloudEntry {
+  return {
+    type: raw.type,
+    name: raw.name,
+    path: raw.path,
+    size: Number(raw.size ?? 0),
+    mime: raw.mime ?? '',
+  }
+}
 
 export interface StackClient {
   /** Lists files and directories in a Nextcloud path via the Stack's WebDAV proxy. */
@@ -116,7 +131,7 @@ export function createStackClient(
   })
 
   const ncCollection = cozy.collection(DOCTYPES.NC_FILES)
-  const docCollection = cozy.collection(DOCTYPES.MIGRATIONS)
+  const docCollection = cozy.collection<TrackingDoc>(DOCTYPES.MIGRATIONS)
   const settingsCollection = cozy.collection(DOCTYPES.SETTINGS)
   const fileCollection = cozy.collection(DOCTYPES.FILES)
 
@@ -161,22 +176,6 @@ export function createStackClient(
     return withTimeout(() => withTokenRefresh(operation), timeoutMs, label)
   }
 
-  /**
-   * Shape of the stat objects returned by cozy-stack-client's file
-   * collection. We unwrap the pieces we actually need and carry them
-   * around as {@link CozyDir}.
-   */
-  interface StackFileStat {
-    data: {
-      _id: string
-      attributes: { path: string; name?: string; type?: string }
-    }
-  }
-
-  function toCozyDir(stat: StackFileStat): CozyDir {
-    return { id: stat.data._id, path: stat.data.attributes.path }
-  }
-
   return {
     /**
      * @param accountId - Nextcloud account ID (io.cozy.accounts)
@@ -192,15 +191,8 @@ export function createStackClient(
           }),
         METADATA_TIMEOUT_MS,
         'listNextcloudDir',
-      ) as { data: Array<Record<string, unknown>> }
-
-      return data.map((entry) => ({
-        type: entry.type as 'file' | 'directory',
-        name: entry.name as string,
-        path: entry.path as string,
-        size: Number(entry.size ?? 0),
-        mime: (entry.mime as string) ?? '',
-      }))
+      )
+      return data.map(toNextcloudEntry)
     },
 
     /**
@@ -225,10 +217,10 @@ export function createStackClient(
       const url = `/remote/nextcloud/${encodeURIComponent(accountId)}/size${trimmed}`
 
       const body = await call(
-        () => cozy.fetchJSON('GET', url),
+        () => cozy.fetchJSON<{ size: number | string }>('GET', url),
         METADATA_TIMEOUT_MS,
         'getNextcloudSize',
-      ) as { size: number | string }
+      )
       return typeof body.size === 'string' ? parseInt(body.size, 10) : body.size
     },
 
@@ -263,16 +255,18 @@ export function createStackClient(
         `?To=${encodeURIComponent(cozyDirId)}&Copy=true&FailOnConflict=true`
 
       const body = await call(
-        () => cozy.fetchJSON('POST', url),
+        () => cozy.fetchJSON<TransferredFile>('POST', url),
         TRANSFER_TIMEOUT_MS,
         'transferFile',
-      ) as { data: { id: string; attributes: Record<string, unknown> } }
-      const attrs = body.data.attributes
+      )
+      const { id, attributes } = body.data
       return {
-        id: body.data.id,
-        name: attrs.name as string,
-        dir_id: attrs.dir_id as string,
-        size: typeof attrs.size === 'string' ? parseInt(attrs.size, 10) : (attrs.size as number),
+        id,
+        name: attributes.name,
+        dir_id: attributes.dir_id,
+        size: typeof attributes.size === 'string'
+          ? parseInt(attributes.size, 10)
+          : attributes.size,
       }
     },
 
@@ -284,10 +278,7 @@ export function createStackClient(
      */
     async ensureDirPath(path: string): Promise<CozyDir> {
       const stat = await call(
-        () =>
-          (fileCollection as unknown as {
-            createDirectoryByPath: (p: string) => Promise<StackFileStat>
-          }).createDirectoryByPath(path),
+        () => fileCollection.createDirectoryByPath(path),
         METADATA_TIMEOUT_MS,
         'ensureDirPath',
       )
@@ -303,12 +294,7 @@ export function createStackClient(
     async ensureChildDir(name: string, parent: CozyDir): Promise<CozyDir> {
       const stat = await call(
         () =>
-          (fileCollection as unknown as {
-            getDirectoryOrCreate: (
-              n: string,
-              p: { _id: string; attributes: { path: string } },
-            ) => Promise<StackFileStat>
-          }).getDirectoryOrCreate(name, {
+          fileCollection.getDirectoryOrCreate(name, {
             _id: parent.id,
             attributes: { path: parent.path },
           }),
@@ -327,10 +313,9 @@ export function createStackClient(
         METADATA_TIMEOUT_MS,
         'getDiskUsage',
       )
-      const attrs = data.attributes as Record<string, string>
       return {
-        used: parseInt(attrs.used, 10),
-        quota: parseInt(attrs.quota, 10),
+        used: parseInt(String(data.attributes.used), 10),
+        quota: parseInt(String(data.attributes.quota), 10),
       }
     },
 
@@ -344,7 +329,7 @@ export function createStackClient(
         METADATA_TIMEOUT_MS,
         'getTrackingDoc',
       )
-      return data as unknown as TrackingDoc
+      return data
     },
 
     /**
@@ -353,11 +338,11 @@ export function createStackClient(
      */
     async updateTrackingDoc(doc: TrackingDoc): Promise<TrackingDoc> {
       const { data } = await call(
-        () => docCollection.update(doc as unknown as Record<string, unknown>),
+        () => docCollection.update(doc),
         METADATA_TIMEOUT_MS,
         'updateTrackingDoc',
       )
-      return { ...doc, _rev: data._rev as string }
+      return { ...doc, _rev: data._rev }
     },
   }
 }

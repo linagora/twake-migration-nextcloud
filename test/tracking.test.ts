@@ -11,6 +11,9 @@ import {
   isStaleRunning,
   STALE_HEARTBEAT_MS,
   IllegalStatusTransitionError,
+  MAX_ERRORS_CAP,
+  MAX_SKIPPED_CAP,
+  TRACKING_SCHEMA_VERSION,
 } from '../src/domain/tracking.js'
 import type { StackClient } from '../src/clients/stack-client.js'
 import type { TrackingDoc } from '../src/domain/types.js'
@@ -429,6 +432,88 @@ describe('status transition guards', () => {
 
     const calledDoc = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
     expect(calledDoc.status).toBe('running')
+  })
+})
+
+describe('tracking doc hygiene', () => {
+  function makeError(i: number) {
+    return { path: `/f${i}`, message: `err ${i}`, at: '2024-01-01T00:00:00Z' }
+  }
+  function makeSkipped(i: number) {
+    return { path: `/s${i}`, reason: 'already exists', size: i }
+  }
+
+  it('stamps schema_version on flush, setRunning, setCompleted, setFailed', async () => {
+    for (const run of [
+      async (stack: StackClient) => flushProgress(stack, 'mig-1', {
+        bytesImported: 0, filesImported: 0, errors: [], skipped: [],
+      }, 0),
+      async (stack: StackClient) => setRunning(stack, 'mig-1', 1000),
+      async (stack: StackClient) => setCompleted(stack, 'mig-1'),
+      async (stack: StackClient) => setFailed(stack, 'mig-1', 'fatal'),
+    ]) {
+      const stack = makeMockStack()
+      await run(stack)
+      const doc = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+      expect(doc.schema_version).toBe(TRACKING_SCHEMA_VERSION)
+    }
+  })
+
+  it('caps errors at MAX_ERRORS_CAP and accumulates truncated count', async () => {
+    // Pre-load the doc with (cap - 2) errors, then push 5 more. Two
+    // new entries fit, three overflow and bump the truncated counter.
+    const existing = Array.from({ length: MAX_ERRORS_CAP - 2 }, (_, i) => makeError(i))
+    const stack = makeMockStack(makeDoc({ errors: existing }))
+
+    await flushProgress(stack, 'mig-1', {
+      bytesImported: 0,
+      filesImported: 0,
+      errors: Array.from({ length: 5 }, (_, i) => makeError(1000 + i)),
+      skipped: [],
+    }, 0)
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.errors).toHaveLength(MAX_ERRORS_CAP)
+    expect(written.errors_truncated_count).toBe(3)
+    // The oldest entries should have been dropped in favour of the newest.
+    expect(written.errors[written.errors.length - 1]).toMatchObject({ path: '/f1004' })
+  })
+
+  it('caps skipped at MAX_SKIPPED_CAP and accumulates truncated count', async () => {
+    const existing = Array.from({ length: MAX_SKIPPED_CAP }, (_, i) => makeSkipped(i))
+    const stack = makeMockStack(makeDoc({ skipped: existing, skipped_truncated_count: 7 }))
+
+    await flushProgress(stack, 'mig-1', {
+      bytesImported: 0,
+      filesImported: 0,
+      errors: [],
+      skipped: Array.from({ length: 4 }, (_, i) => makeSkipped(2000 + i)),
+    }, 0)
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.skipped).toHaveLength(MAX_SKIPPED_CAP)
+    // Prior count 7 + 4 newly overflowed.
+    expect(written.skipped_truncated_count).toBe(11)
+  })
+
+  it('setFailed populates both failure_reason and the legacy errors sentinel', async () => {
+    const stack = makeMockStack()
+    await setFailed(stack, 'mig-1', 'ran out of quota')
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.failure_reason).toBe('ran out of quota')
+    expect(written.errors.at(-1)).toMatchObject({ path: '', message: 'ran out of quota' })
+  })
+
+  it('flushAndFail populates both failure_reason and the legacy errors sentinel', async () => {
+    const stack = makeMockStack()
+    await flushAndFail(stack, 'mig-1', 'stack exploded', {
+      bytesImported: 0, filesImported: 0, errors: [], skipped: [],
+    }, 0)
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.failure_reason).toBe('stack exploded')
+    expect(written.errors.at(-1)).toMatchObject({ path: '', message: 'stack exploded' })
   })
 })
 

@@ -4,6 +4,12 @@ import { loadConfig } from './runtime/config.js'
 import { createClouderyClient } from './clients/cloudery-client.js'
 import { handleMigrationMessage } from './runtime/consumer.js'
 import { createMigrationRunner } from './runtime/migration-runner.js'
+import { createOpsServer } from './runtime/http-server.js'
+import {
+  bindActiveMigrationsSource,
+  enableDefaultMetrics,
+  rabbitmqConnected,
+} from './runtime/metrics.js'
 import { parseMigrationCommand } from './domain/types.js'
 
 const EXCHANGE = 'migration'
@@ -24,8 +30,10 @@ async function main(): Promise<void> {
 
   logger.info({ event: 'service.starting' }, 'Starting Nextcloud migration service')
 
+  enableDefaultMetrics()
   const clouderyClient = createClouderyClient(config.clouderyUrl, config.clouderyToken, logger)
   const migrationRunner = createMigrationRunner(config.maxConcurrentMigrations, logger)
+  bindActiveMigrationsSource(() => migrationRunner.active)
 
   const rabbitClient = new RabbitMQClient({
     url: config.rabbitmqUrl,
@@ -35,7 +43,22 @@ async function main(): Promise<void> {
     logger,
   })
 
+  let shuttingDown = false
+  const opsServer = createOpsServer(
+    config.httpPort,
+    {
+      isRabbitMQConnected: () => rabbitClient.isConnected(),
+      isShuttingDown: () => shuttingDown,
+    },
+    logger,
+  )
+  // Start the ops server BEFORE RabbitMQ so /healthz is answerable
+  // while init runs — Kubernetes sees a live pod even if broker
+  // connection takes a moment.
+  await opsServer.start()
+
   await rabbitClient.init()
+  rabbitmqConnected.set(1)
   logger.info({ event: 'rabbitmq.connected' }, 'Connected to RabbitMQ')
 
   await rabbitClient.subscribe(
@@ -66,7 +89,6 @@ async function main(): Promise<void> {
     routing_key: ROUTING_KEY,
   }, 'Subscribed to migration queue')
 
-  let shuttingDown = false
   const shutdown = async (signal: string) => {
     if (shuttingDown) return
     shuttingDown = true
@@ -76,7 +98,9 @@ async function main(): Promise<void> {
       active_migrations: migrationRunner.active,
     }, 'Shutting down')
     await rabbitClient.close()
+    rabbitmqConnected.set(0)
     const drained = await migrationRunner.drain(SHUTDOWN_DRAIN_MS)
+    await opsServer.stop()
     logger.info({
       event: 'service.stopped',
       drained,

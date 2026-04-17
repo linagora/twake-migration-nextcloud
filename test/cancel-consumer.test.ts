@@ -20,6 +20,11 @@ const logger = {
 
 const config: Config = {
   rabbitmqUrl: 'amqp://localhost',
+  rabbitmqExchange: 'migration',
+  rabbitmqRequestRoutingKey: 'nextcloud.migration.requested',
+  rabbitmqRequestQueue: 'migration.nextcloud.commands',
+  rabbitmqCancelRoutingKey: 'nextcloud.migration.canceled',
+  rabbitmqCancelQueue: 'migration.nextcloud.cancels',
   clouderyUrl: 'https://manager.cozycloud.cc',
   clouderyToken: 'secret',
   logLevel: 'info',

@@ -1,5 +1,15 @@
 export interface Config {
   rabbitmqUrl: string
+  /** Topic exchange the Stack publishes migration messages to. */
+  rabbitmqExchange: string
+  /** Routing key for migration-request messages. */
+  rabbitmqRequestRoutingKey: string
+  /** Queue the service subscribes to for migration requests. */
+  rabbitmqRequestQueue: string
+  /** Routing key for migration-cancel messages. */
+  rabbitmqCancelRoutingKey: string
+  /** Queue the service subscribes to for cancel messages. */
+  rabbitmqCancelQueue: string
   clouderyUrl: string
   clouderyToken: string
   logLevel: string
@@ -14,6 +24,12 @@ export interface Config {
   /** TCP port the ops HTTP server (probes + /metrics) binds on. */
   httpPort: number
 }
+
+const DEFAULT_RABBITMQ_EXCHANGE = 'migration'
+const DEFAULT_REQUEST_ROUTING_KEY = 'nextcloud.migration.requested'
+const DEFAULT_REQUEST_QUEUE = 'migration.nextcloud.commands'
+const DEFAULT_CANCEL_ROUTING_KEY = 'nextcloud.migration.canceled'
+const DEFAULT_CANCEL_QUEUE = 'migration.nextcloud.cancels'
 
 function requireEnv(name: string): string {
   const value = process.env[name]
@@ -49,6 +65,11 @@ export function loadConfig(): Config {
   }
   return {
     rabbitmqUrl: requireEnv('RABBITMQ_URL'),
+    rabbitmqExchange: process.env.RABBITMQ_EXCHANGE || DEFAULT_RABBITMQ_EXCHANGE,
+    rabbitmqRequestRoutingKey: process.env.RABBITMQ_REQUEST_ROUTING_KEY || DEFAULT_REQUEST_ROUTING_KEY,
+    rabbitmqRequestQueue: process.env.RABBITMQ_REQUEST_QUEUE || DEFAULT_REQUEST_QUEUE,
+    rabbitmqCancelRoutingKey: process.env.RABBITMQ_CANCEL_ROUTING_KEY || DEFAULT_CANCEL_ROUTING_KEY,
+    rabbitmqCancelQueue: process.env.RABBITMQ_CANCEL_QUEUE || DEFAULT_CANCEL_QUEUE,
     clouderyUrl: requireEnv('CLOUDERY_URL'),
     clouderyToken: requireEnv('CLOUDERY_TOKEN'),
     logLevel: process.env.LOG_LEVEL ?? 'info',

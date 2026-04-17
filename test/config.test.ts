@@ -23,6 +23,11 @@ describe('loadConfig', () => {
     const config = loadConfig()
     expect(config).toEqual({
       rabbitmqUrl: 'amqp://localhost',
+      rabbitmqExchange: 'migration',
+      rabbitmqRequestRoutingKey: 'nextcloud.migration.requested',
+      rabbitmqRequestQueue: 'migration.nextcloud.commands',
+      rabbitmqCancelRoutingKey: 'nextcloud.migration.canceled',
+      rabbitmqCancelQueue: 'migration.nextcloud.cancels',
       clouderyUrl: 'https://manager.cozycloud.cc',
       clouderyToken: 'secret-token',
       logLevel: 'info',
@@ -31,6 +36,32 @@ describe('loadConfig', () => {
       maxConcurrentMigrations: 10,
       httpPort: 8080,
     })
+  })
+
+  it('overrides the rabbitmq topology from env vars', async () => {
+    Object.assign(process.env, {
+      ...VALID_ENV,
+      RABBITMQ_EXCHANGE: 'custom.exchange',
+      RABBITMQ_REQUEST_ROUTING_KEY: 'custom.requested',
+      RABBITMQ_REQUEST_QUEUE: 'custom.requests',
+      RABBITMQ_CANCEL_ROUTING_KEY: 'custom.canceled',
+      RABBITMQ_CANCEL_QUEUE: 'custom.cancels',
+    })
+    const { loadConfig } = await import('../src/runtime/config.js')
+    const config = loadConfig()
+    expect(config.rabbitmqExchange).toBe('custom.exchange')
+    expect(config.rabbitmqRequestRoutingKey).toBe('custom.requested')
+    expect(config.rabbitmqRequestQueue).toBe('custom.requests')
+    expect(config.rabbitmqCancelRoutingKey).toBe('custom.canceled')
+    expect(config.rabbitmqCancelQueue).toBe('custom.cancels')
+  })
+
+  it('falls back to defaults when a topology env var is empty', async () => {
+    // An empty env var from a ConfigMap must not override the default;
+    // the library requires non-empty names when it declares the queue.
+    Object.assign(process.env, { ...VALID_ENV, RABBITMQ_EXCHANGE: '' })
+    const { loadConfig } = await import('../src/runtime/config.js')
+    expect(loadConfig().rabbitmqExchange).toBe('migration')
   })
 
   it('reads HTTP_PORT when set', async () => {

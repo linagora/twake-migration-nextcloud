@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { parseCancelCommand, parseMigrationCommand } from '../src/domain/types.js'
+import { parseCancelCommand, parseMigrationCommand } from '../src/domain/commands.js'
 
 describe('parseMigrationCommand', () => {
   afterEach(() => {

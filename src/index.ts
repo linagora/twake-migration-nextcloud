@@ -11,7 +11,7 @@ import {
   enableDefaultMetrics,
   rabbitmqConnected,
 } from './runtime/metrics.js'
-import { parseCancelCommand, parseMigrationCommand } from './domain/types.js'
+import { parseCancelCommand, parseMigrationCommand } from './domain/commands.js'
 
 const EXCHANGE = 'migration'
 const REQUEST_ROUTING_KEY = 'nextcloud.migration.requested'

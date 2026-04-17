@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { makeTestConfig } from './fixtures.js'
 
 describe('loadConfig', () => {
   const VALID_ENV = {
@@ -20,22 +21,7 @@ describe('loadConfig', () => {
   it('parses valid environment variables', async () => {
     Object.assign(process.env, VALID_ENV)
     const { loadConfig } = await import('../src/runtime/config.js')
-    const config = loadConfig()
-    expect(config).toEqual({
-      rabbitmqUrl: 'amqp://localhost',
-      rabbitmqExchange: 'migration',
-      rabbitmqRequestRoutingKey: 'nextcloud.migration.requested',
-      rabbitmqRequestQueue: 'migration.nextcloud.commands',
-      rabbitmqCancelRoutingKey: 'nextcloud.migration.canceled',
-      rabbitmqCancelQueue: 'migration.nextcloud.cancels',
-      clouderyUrl: 'https://manager.cozycloud.cc',
-      clouderyToken: 'secret-token',
-      logLevel: 'info',
-      flushInterval: 25,
-      stackUrlScheme: 'https',
-      maxConcurrentMigrations: 10,
-      httpPort: 8080,
-    })
+    expect(loadConfig()).toEqual(makeTestConfig({ clouderyToken: 'secret-token' }))
   })
 
   it('overrides the rabbitmq topology from env vars', async () => {

@@ -1,14 +1,9 @@
 export interface Config {
   rabbitmqUrl: string
-  /** Topic exchange the Stack publishes migration messages to. */
   rabbitmqExchange: string
-  /** Routing key for migration-request messages. */
   rabbitmqRequestRoutingKey: string
-  /** Queue the service subscribes to for migration requests. */
   rabbitmqRequestQueue: string
-  /** Routing key for migration-cancel messages. */
   rabbitmqCancelRoutingKey: string
-  /** Queue the service subscribes to for cancel messages. */
   rabbitmqCancelQueue: string
   clouderyUrl: string
   clouderyToken: string
@@ -40,6 +35,16 @@ function requireEnv(name: string): string {
 }
 
 /**
+ * Reads an optional env var, treating missing AND empty string as "unset".
+ * Uses `||` rather than `??` deliberately: an empty string is the common
+ * foot-gun when the value comes from a Helm chart's ConfigMap key that
+ * the user forgot to fill in, and we want the default in that case too.
+ */
+function envOrDefault(name: string, fallback: string): string {
+  return process.env[name] || fallback
+}
+
+/**
  * Loads and validates configuration from environment variables.
  * @returns Parsed Config object
  * @throws If any required env var is missing or has an invalid value
@@ -65,11 +70,11 @@ export function loadConfig(): Config {
   }
   return {
     rabbitmqUrl: requireEnv('RABBITMQ_URL'),
-    rabbitmqExchange: process.env.RABBITMQ_EXCHANGE || DEFAULT_RABBITMQ_EXCHANGE,
-    rabbitmqRequestRoutingKey: process.env.RABBITMQ_REQUEST_ROUTING_KEY || DEFAULT_REQUEST_ROUTING_KEY,
-    rabbitmqRequestQueue: process.env.RABBITMQ_REQUEST_QUEUE || DEFAULT_REQUEST_QUEUE,
-    rabbitmqCancelRoutingKey: process.env.RABBITMQ_CANCEL_ROUTING_KEY || DEFAULT_CANCEL_ROUTING_KEY,
-    rabbitmqCancelQueue: process.env.RABBITMQ_CANCEL_QUEUE || DEFAULT_CANCEL_QUEUE,
+    rabbitmqExchange: envOrDefault('RABBITMQ_EXCHANGE', DEFAULT_RABBITMQ_EXCHANGE),
+    rabbitmqRequestRoutingKey: envOrDefault('RABBITMQ_REQUEST_ROUTING_KEY', DEFAULT_REQUEST_ROUTING_KEY),
+    rabbitmqRequestQueue: envOrDefault('RABBITMQ_REQUEST_QUEUE', DEFAULT_REQUEST_QUEUE),
+    rabbitmqCancelRoutingKey: envOrDefault('RABBITMQ_CANCEL_ROUTING_KEY', DEFAULT_CANCEL_ROUTING_KEY),
+    rabbitmqCancelQueue: envOrDefault('RABBITMQ_CANCEL_QUEUE', DEFAULT_CANCEL_QUEUE),
     clouderyUrl: requireEnv('CLOUDERY_URL'),
     clouderyToken: requireEnv('CLOUDERY_TOKEN'),
     logLevel: process.env.LOG_LEVEL ?? 'info',

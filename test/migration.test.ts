@@ -325,3 +325,137 @@ describe('runMigration', () => {
     expect(runningUpdate?.progress.bytes_total).toBe(12345)
   })
 })
+
+describe('runMigration cancellation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('transitions to canceled without transferring when the signal is pre-aborted', async () => {
+    const entries: NextcloudEntry[] = [
+      { type: 'file', name: 'a.txt', path: '/a.txt', size: 100, mime: 'text/plain' },
+      { type: 'file', name: 'b.txt', path: '/b.txt', size: 100, mime: 'text/plain' },
+    ]
+    const stack = makeStack({
+      listNextcloudDir: vi.fn().mockResolvedValueOnce(entries),
+    })
+    const controller = new AbortController()
+    controller.abort()
+
+    await runMigration(makeCommand(), stack, logger, 200, '/Nextcloud', 25, controller.signal)
+
+    expect(stack.transferFile).not.toHaveBeenCalled()
+    const writes = vi.mocked(stack.updateTrackingDoc).mock.calls.map((c) => c[0] as TrackingDoc)
+    expect(writes.at(-1)?.status).toBe('canceled')
+    expect(writes.at(-1)?.failure_reason).toBe('canceled by user')
+  })
+
+  it('transfers files up to the abort point, then stops and marks canceled', async () => {
+    const entries: NextcloudEntry[] = [
+      { type: 'file', name: 'a.txt', path: '/a.txt', size: 100, mime: 'text/plain' },
+      { type: 'file', name: 'b.txt', path: '/b.txt', size: 100, mime: 'text/plain' },
+      { type: 'file', name: 'c.txt', path: '/c.txt', size: 100, mime: 'text/plain' },
+    ]
+    const stack = makeStack({
+      listNextcloudDir: vi.fn().mockResolvedValueOnce(entries),
+    })
+    const controller = new AbortController()
+    vi.mocked(stack.transferFile).mockImplementationOnce(async () => {
+      // Abort after the first file has finished but before the next
+      // checkpoint runs — models the operator hitting Cancel while a
+      // mid-size transfer is in flight.
+      controller.abort()
+      return { id: 'f-a', name: 'a.txt', dir_id: 'dir-id', size: 100 }
+    })
+
+    await runMigration(makeCommand(), stack, logger, 300, '/Nextcloud', 25, controller.signal)
+
+    expect(stack.transferFile).toHaveBeenCalledTimes(1)
+    const writes = vi.mocked(stack.updateTrackingDoc).mock.calls.map((c) => c[0] as TrackingDoc)
+    expect(writes.at(-1)?.status).toBe('canceled')
+    expect(writes.at(-1)?.progress.files_imported).toBe(1)
+  })
+
+  it('picks up cancel_requested flag via flushProgress (cross-pod cancel)', async () => {
+    // Simulate a cancel written by another pod that flipped
+    // cancel_requested between our writes. flushProgress reads the
+    // doc before writing — the flag arrives through that read and
+    // trips the CancellationRequestedError path without relying on
+    // the local AbortController.
+    let calls = 0
+    const stack = makeStack({
+      listNextcloudDir: vi.fn().mockResolvedValueOnce([
+        { type: 'file', name: 'a.txt', path: '/a.txt', size: 100, mime: 'text/plain' },
+        { type: 'file', name: 'b.txt', path: '/b.txt', size: 100, mime: 'text/plain' },
+      ]),
+      getTrackingDoc: vi.fn().mockImplementation(async () => {
+        calls += 1
+        // After setRunning's read+write and the first mid-run flush,
+        // flip the flag so the next flushProgress read observes it.
+        const cancelRequested = calls >= 3
+        return {
+          _id: 'mig-1', _rev: `rev-${calls}`,
+          status: calls === 1 ? 'pending' : 'running',
+          target_dir: '/Nextcloud',
+          progress: { files_imported: 0, files_total: 0, bytes_imported: 0, bytes_total: 200 },
+          errors: [], skipped: [],
+          started_at: calls === 1 ? null : '2026-04-17T00:00:00Z',
+          finished_at: null,
+          cancel_requested: cancelRequested,
+        }
+      }),
+    })
+
+    await runMigration(makeCommand(), stack, logger, 200, '/Nextcloud', 1)
+
+    // flushInterval=1 → flush after every file. The first file flushes,
+    // reads the flag, and throws.
+    const writes = vi.mocked(stack.updateTrackingDoc).mock.calls.map((c) => c[0] as TrackingDoc)
+    expect(writes.at(-1)?.status).toBe('canceled')
+  })
+
+  it('logs completion_superseded_by_cancel when flushAndComplete loses to a late cancel', async () => {
+    // Stateful fake: the doc flips to canceled status between the
+    // walk and the final flushAndComplete. That write hits the guard
+    // and throws IllegalStatusTransitionError, which runMigration
+    // must recognise rather than routing through flushAndFail.
+    let finalWrite = false
+    let currentStatus: TrackingDoc['status'] = 'pending'
+    const stack = makeStack({
+      listNextcloudDir: vi.fn().mockResolvedValueOnce([
+        { type: 'file', name: 'a.txt', path: '/a.txt', size: 100, mime: 'text/plain' },
+      ]),
+      getTrackingDoc: vi.fn().mockImplementation(async () => ({
+        _id: 'mig-1', _rev: 'rev',
+        status: currentStatus,
+        target_dir: '/Nextcloud',
+        progress: { files_imported: 0, files_total: 0, bytes_imported: 0, bytes_total: 100 },
+        errors: [], skipped: [],
+        started_at: null, finished_at: null,
+      })),
+      updateTrackingDoc: vi.fn().mockImplementation(async (doc: TrackingDoc) => {
+        if (doc.status === 'running') {
+          currentStatus = 'running'
+        }
+        if (!finalWrite && doc.progress.files_imported > 0 && doc.status === 'completed') {
+          // Just before the success write lands, another pod finalizes
+          // the doc as canceled. The read-modify-write loop re-reads
+          // and the updater throws IllegalStatusTransitionError.
+          currentStatus = 'canceled'
+          finalWrite = true
+          throw Object.assign(new Error(''), { status: 409 })
+        }
+        return { ...doc, _rev: 'next' }
+      }),
+    })
+
+    await expect(
+      runMigration(makeCommand(), stack, logger, 100, '/Nextcloud'),
+    ).resolves.toBeUndefined()
+
+    // The final update should NOT be a 'failed' write: the run must
+    // leave the tracking doc in its existing canceled state.
+    const writes = vi.mocked(stack.updateTrackingDoc).mock.calls.map((c) => c[0] as TrackingDoc)
+    expect(writes.some((w) => w.status === 'failed')).toBe(false)
+  })
+})

@@ -57,12 +57,27 @@ export const migrationsStarted = new Counter({
 })
 
 /**
- * Migrations that reached a terminal state. `outcome` is `completed`
- * or `failed`, matching the tracking document's status.
+ * Migrations that reached a terminal state. `outcome` is `completed`,
+ * `failed`, or `canceled`, matching the tracking document's status.
  */
 export const migrationsFinished = new Counter({
   name: 'nextcloud_migration_finished_total',
   help: 'Total number of migrations that reached a terminal state.',
+  labelNames: ['outcome'] as const,
+  registers: [registry],
+})
+
+/**
+ * Cancel messages received, labelled by how the handler resolved them:
+ * - `recorded`: first-time flag write (and runner signalled if present)
+ * - `already_requested`: flag already set by a previous cancel
+ * - `ignored_terminal`: migration already in completed/failed/canceled
+ * - `not_found`: tracking doc 404
+ * - `pre_start`: request consumer observed the flag before launch
+ */
+export const cancelsReceived = new Counter({
+  name: 'nextcloud_migration_cancels_received_total',
+  help: 'Total number of cancel messages received, by handler outcome.',
   labelNames: ['outcome'] as const,
   registers: [registry],
 })

@@ -20,7 +20,8 @@ In Kubernetes, point `livenessProbe` at `/healthz` and `readinessProbe` at `/rea
 |---|---|---|
 | `nextcloud_migration_active` | gauge | How many migrations are in-flight right now. Sustained at the concurrency cap means you're queue-bound. |
 | `nextcloud_migration_started_total` | counter | Migration arrival rate. Alert on a drop to zero while the RabbitMQ queue has items — indicates the consumer has stopped picking work up. |
-| `nextcloud_migration_finished_total{outcome}` | counter | `outcome="completed"` vs `outcome="failed"`. Alert on a sustained failure ratio above your tolerance (e.g. > 10%). |
+| `nextcloud_migration_finished_total{outcome}` | counter | `outcome="completed"`, `outcome="failed"`, or `outcome="canceled"`. Alert on a sustained failure ratio above your tolerance (e.g. > 10%). User-driven cancels are expected and should not page. |
+| `nextcloud_migration_cancels_received_total{outcome}` | counter | Cancel messages received by handler outcome: `recorded`, `already_requested`, `ignored_terminal`, `not_found`, `pre_start`. A spike in `not_found` or `ignored_terminal` points at a publisher sending stale cancels. |
 | `nextcloud_migration_files_total{outcome}` | counter | Per-file outcomes (`transferred`, `skipped`, `failed`). `skipped` is normal during resumes; `failed` is not. |
 | `nextcloud_migration_file_transfer_duration_seconds` | histogram | Per-file transfer latency. A shift in the upper buckets is an early signal of Stack or Nextcloud slowdown. |
 | `nextcloud_migration_cloudery_token_total{outcome}` | counter | `outcome="success"` vs `"failed"`. A spike in failed tokens points at Cloudery, not at this service. |

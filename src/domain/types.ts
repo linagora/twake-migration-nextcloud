@@ -16,7 +16,7 @@ export interface TrackingDoc {
    * the shape changes incompatibly.
    */
   schema_version?: number
-  status: 'pending' | 'running' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'canceled'
   target_dir: string
   progress: TrackingProgress
   /** Per-file errors, capped at {@link MAX_ERRORS_CAP}. */
@@ -51,6 +51,27 @@ export interface TrackingDoc {
    * shape; new consumers should prefer this field.
    */
   failure_reason?: string | null
+  /**
+   * Durable cancellation signal. Set to true by the cancel handler.
+   * A running migration picks it up at the next `flushProgress`
+   * checkpoint; a pending/failed doc about to start reads it in
+   * `handleMigrationMessage` and transitions straight to `canceled`
+   * without launching. Optional for back-compat with docs written
+   * before the field existed.
+   */
+  cancel_requested?: boolean
+  /**
+   * ISO timestamp of when the user requested cancellation. Distinct
+   * from `finished_at`, which stamps the terminal transition. Useful
+   * for measuring the time between request and stop.
+   */
+  canceled_at?: string | null
+}
+
+export interface CancelCommand {
+  migrationId: string
+  workplaceFqdn: string
+  timestamp: number
 }
 
 export interface TrackingProgress {
@@ -72,28 +93,40 @@ export interface TrackingSkipped {
   size: number
 }
 
+function requireString(msg: Record<string, unknown>, key: string, kind: string): string {
+  const value = msg[key]
+  if (typeof value !== 'string' || !value) {
+    throw new Error(`Invalid ${kind} message: missing or empty ${key}`)
+  }
+  return value
+}
+
+function coerceTimestamp(msg: Record<string, unknown>): number {
+  return typeof msg.timestamp === 'number' ? msg.timestamp : Date.now()
+}
+
+/**
+ * Validates and extracts a CancelCommand from a raw RabbitMQ message.
+ * @throws If migrationId or workplaceFqdn are missing
+ */
+export function parseCancelCommand(msg: Record<string, unknown>): CancelCommand {
+  return {
+    migrationId: requireString(msg, 'migrationId', 'cancel'),
+    workplaceFqdn: requireString(msg, 'workplaceFqdn', 'cancel'),
+    timestamp: coerceTimestamp(msg),
+  }
+}
+
 /**
  * Validates and extracts a MigrationCommand from a raw RabbitMQ message.
- * @param msg - Raw message payload from RabbitMQ
- * @returns Validated MigrationCommand with defaults for optional fields
  * @throws If migrationId, workplaceFqdn, or accountId are missing
  */
 export function parseMigrationCommand(msg: Record<string, unknown>): MigrationCommand {
-  const { migrationId, workplaceFqdn, accountId, sourcePath, timestamp } = msg
-  if (typeof migrationId !== 'string' || !migrationId) {
-    throw new Error(`Invalid migration message: missing or empty migrationId`)
-  }
-  if (typeof workplaceFqdn !== 'string' || !workplaceFqdn) {
-    throw new Error(`Invalid migration message: missing or empty workplaceFqdn`)
-  }
-  if (typeof accountId !== 'string' || !accountId) {
-    throw new Error(`Invalid migration message: missing or empty accountId`)
-  }
   return {
-    migrationId,
-    workplaceFqdn,
-    accountId,
-    sourcePath: typeof sourcePath === 'string' ? sourcePath : '/',
-    timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+    migrationId: requireString(msg, 'migrationId', 'migration'),
+    workplaceFqdn: requireString(msg, 'workplaceFqdn', 'migration'),
+    accountId: requireString(msg, 'accountId', 'migration'),
+    sourcePath: typeof msg.sourcePath === 'string' ? msg.sourcePath : '/',
+    timestamp: coerceTimestamp(msg),
   }
 }

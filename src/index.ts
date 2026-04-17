@@ -3,6 +3,7 @@ import { RabbitMQClient, type RabbitMQMessage } from '@linagora/rabbitmq-client'
 import { loadConfig } from './runtime/config.js'
 import { createClouderyClient } from './clients/cloudery-client.js'
 import { handleMigrationMessage } from './runtime/consumer.js'
+import { handleCancelMessage } from './runtime/cancel-consumer.js'
 import { createMigrationRunner } from './runtime/migration-runner.js'
 import { createOpsServer } from './runtime/http-server.js'
 import {
@@ -10,11 +11,13 @@ import {
   enableDefaultMetrics,
   rabbitmqConnected,
 } from './runtime/metrics.js'
-import { parseMigrationCommand } from './domain/types.js'
+import { parseCancelCommand, parseMigrationCommand } from './domain/types.js'
 
 const EXCHANGE = 'migration'
-const ROUTING_KEY = 'nextcloud.migration.requested'
-const QUEUE = 'migration.nextcloud.commands'
+const REQUEST_ROUTING_KEY = 'nextcloud.migration.requested'
+const REQUEST_QUEUE = 'migration.nextcloud.commands'
+const CANCEL_ROUTING_KEY = 'nextcloud.migration.canceled'
+const CANCEL_QUEUE = 'migration.nextcloud.cancels'
 /** How long we give in-flight migrations to finish on SIGTERM/SIGINT
  * before exiting anyway. The heartbeat/stale-recovery logic picks up
  * anything we leave behind, so this is a politeness ceiling rather
@@ -63,8 +66,8 @@ async function main(): Promise<void> {
 
   await rabbitClient.subscribe(
     EXCHANGE,
-    ROUTING_KEY,
-    QUEUE,
+    REQUEST_ROUTING_KEY,
+    REQUEST_QUEUE,
     async (msg: RabbitMQMessage) => {
       // Schema validation failure is permanent — no retry will make
       // the payload valid — so we log and ACK rather than spin the
@@ -85,9 +88,34 @@ async function main(): Promise<void> {
   logger.info({
     event: 'rabbitmq.subscribed',
     exchange: EXCHANGE,
-    queue: QUEUE,
-    routing_key: ROUTING_KEY,
+    queue: REQUEST_QUEUE,
+    routing_key: REQUEST_ROUTING_KEY,
   }, 'Subscribed to migration queue')
+
+  await rabbitClient.subscribe(
+    EXCHANGE,
+    CANCEL_ROUTING_KEY,
+    CANCEL_QUEUE,
+    async (msg: RabbitMQMessage) => {
+      let command
+      try {
+        command = parseCancelCommand(msg)
+      } catch (error) {
+        logger.warn({
+          event: 'cancel.invalid_message',
+          error: error instanceof Error ? error.message : String(error),
+        }, 'Dropping malformed cancel message')
+        return
+      }
+      await handleCancelMessage(command, clouderyClient, logger, config, migrationRunner)
+    }
+  )
+  logger.info({
+    event: 'rabbitmq.subscribed',
+    exchange: EXCHANGE,
+    queue: CANCEL_QUEUE,
+    routing_key: CANCEL_ROUTING_KEY,
+  }, 'Subscribed to cancel queue')
 
   const shutdown = async (signal: string) => {
     if (shuttingDown) return

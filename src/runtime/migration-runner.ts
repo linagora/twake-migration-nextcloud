@@ -1,4 +1,5 @@
 import type { Logger } from 'pino'
+import { CancellationRequestedError } from '../domain/errors.js'
 
 /**
  * Bounds the number of concurrent migrations and tracks in-flight work
@@ -9,11 +10,26 @@ import type { Logger } from 'pino'
  */
 export interface MigrationRunner {
   /**
-   * Blocks until a concurrency slot is available, then starts `task`
-   * in the background and returns. The caller does not await the
-   * task's completion — the slot is held until the task settles.
+   * Blocks until a concurrency slot is available, then starts the
+   * migration task in the background and returns. The caller does
+   * not await the task's completion — the slot is held until the
+   * task settles.
+   *
+   * An `AbortSignal` for cooperative cancellation is created per
+   * migration and passed to the factory, and the corresponding
+   * `AbortController` is tracked keyed by `migrationId` so
+   * {@link cancel} can signal it from elsewhere.
+   *
+   * @param migrationId - Unique id used as the registry key
+   * @param factory - Receives an AbortSignal and returns the task
    */
-  run(task: () => Promise<void>): Promise<void>
+  run(migrationId: string, factory: (signal: AbortSignal) => Promise<void>): Promise<void>
+  /**
+   * Aborts the `AbortController` registered for `migrationId`, if any.
+   * @returns true when a controller was found and aborted on this
+   *   pod, false when the migration is not in flight here.
+   */
+  cancel(migrationId: string): boolean
   /**
    * Waits for every in-flight task to settle, up to `timeoutMs`.
    * @returns true when all tasks drained in time, false when the
@@ -40,6 +56,7 @@ export function createMigrationRunner(
   let active = 0
   const waiters: Array<() => void> = []
   const inFlight = new Set<Promise<void>>()
+  const controllers = new Map<string, AbortController>()
 
   function acquire(): Promise<void> {
     if (active < maxConcurrent) {
@@ -61,20 +78,42 @@ export function createMigrationRunner(
   }
 
   return {
-    async run(task) {
+    async run(migrationId, factory) {
       await acquire()
+      const controller = new AbortController()
+      controllers.set(migrationId, controller)
+      // The factory may throw synchronously before returning a promise
+      // (e.g. a bug in a caller's `(signal) => ...` expression). Without
+      // this guard, the slot and controller would leak because the
+      // `.catch/.finally` chain below never attaches.
+      let taskPromise: Promise<void>
+      try {
+        taskPromise = factory(controller.signal)
+      } catch (error) {
+        controllers.delete(migrationId)
+        release()
+        throw error
+      }
       // Swallow rejections inside the tracked promise so a task that
       // escapes its own error handling does not produce an unhandled
       // rejection. Callers are expected to wrap their task with a
       // `.catch` that handles logging; this is a belt-and-braces
       // guard so the shutdown drain never sees an unsettled promise.
-      const promise = task()
+      const promise = taskPromise
         .catch(() => { /* fire-and-forget contract; see above */ })
         .finally(() => {
+          controllers.delete(migrationId)
           release()
           inFlight.delete(promise)
         })
       inFlight.add(promise)
+    },
+
+    cancel(migrationId) {
+      const controller = controllers.get(migrationId)
+      if (!controller) return false
+      controller.abort(new CancellationRequestedError())
+      return true
     },
 
     async drain(timeoutMs) {

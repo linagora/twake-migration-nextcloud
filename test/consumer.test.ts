@@ -7,10 +7,12 @@ import type { Config } from '../src/runtime/config.js'
 import type { MigrationRunner } from '../src/runtime/migration-runner.js'
 import type { Logger } from 'pino'
 
-/** Pass-through runner for tests: invokes the task synchronously so
- *  assertions can run afterwards. Production runs tasks in the background. */
+/** Pass-through runner for tests: invokes the task factory synchronously
+ *  with a never-aborting signal so assertions can run afterwards.
+ *  Production runs tasks in the background and creates a real controller. */
 const passThroughRunner: MigrationRunner = {
-  async run(task) { await task() },
+  async run(_migrationId, factory) { await factory(new AbortController().signal) },
+  cancel() { return false },
   async drain() { return true },
   get active() { return 0 },
 }
@@ -105,7 +107,9 @@ describe('handleMigrationMessage', () => {
     expect(mockStack.getTrackingDoc).toHaveBeenCalledWith('mig-1')
     // The pre-flight size from getNextcloudSize is forwarded to runMigration
     // so setRunning can seed bytes_total for the UI's progress bar.
-    expect(runMigration).toHaveBeenCalledWith(command, mockStack, logger, 12345, '/Nextcloud', config.flushInterval)
+    expect(runMigration).toHaveBeenCalledWith(
+      command, mockStack, logger, 12345, '/Nextcloud', config.flushInterval, expect.any(AbortSignal),
+    )
   })
 
   it('skips migration if status is completed', async () => {
@@ -165,6 +169,33 @@ describe('handleMigrationMessage', () => {
     expect(runMigration).toHaveBeenCalled()
   })
 
+  it('skips migration if status is already canceled', async () => {
+    vi.mocked(mockStack.getTrackingDoc).mockResolvedValueOnce(makePendingDoc({
+      status: 'canceled',
+      started_at: '2024-01-01T00:00:00.000Z',
+      finished_at: '2024-01-01T00:01:00.000Z',
+    }))
+
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config, passThroughRunner)
+
+    expect(runMigration).not.toHaveBeenCalled()
+  })
+
+  it('transitions to canceled without launching when cancel_requested is set pre-start', async () => {
+    vi.mocked(mockStack.getTrackingDoc).mockResolvedValueOnce(makePendingDoc({
+      status: 'pending',
+      cancel_requested: true,
+      canceled_at: '2026-04-17T12:00:00.000Z',
+    }))
+
+    await handleMigrationMessage(makeCommand(), mockCloudery, logger, config, passThroughRunner)
+
+    expect(runMigration).not.toHaveBeenCalled()
+    const canceledWrite = vi.mocked(mockStack.updateTrackingDoc).mock.calls
+      .find((c) => (c[0] as TrackingDoc).status === 'canceled')
+    expect(canceledWrite).toBeDefined()
+  })
+
   it('marks migration as failed if quota is insufficient', async () => {
     vi.mocked(mockStack.getDiskUsage).mockResolvedValueOnce({ used: 99000, quota: 100000 })
     // The recursive oc:size total exceeds the free quota.
@@ -195,7 +226,7 @@ describe('handleMigrationMessage', () => {
     await handleMigrationMessage(makeCommand(), mockCloudery, logger, config, passThroughRunner)
 
     expect(runMigration).toHaveBeenCalledWith(
-      expect.anything(), mockStack, logger, 10, '/Nextcloud', config.flushInterval,
+      expect.anything(), mockStack, logger, 10, '/Nextcloud', config.flushInterval, expect.any(AbortSignal),
     )
   })
 

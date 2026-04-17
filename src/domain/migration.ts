@@ -1,7 +1,7 @@
 import type { Logger } from 'pino'
 import type { CozyDir, StackClient } from '../clients/stack-client.js'
 import type { MigrationCommand } from './types.js'
-import { getErrorMessage } from './errors.js'
+import { CancellationRequestedError, getErrorMessage } from './errors.js'
 import {
   fileTransferDuration,
   filesProcessed,
@@ -12,9 +12,11 @@ import {
   setRunning,
   flushProgress,
   flushAndComplete,
+  flushAndCancel,
   flushAndFail,
   emptyLocalProgress,
   isConflictError,
+  IllegalStatusTransitionError,
   type LocalProgress,
 } from './tracking.js'
 
@@ -61,6 +63,8 @@ interface MigrationContext {
   filesSinceFlush: number
   flushInterval: number
   startedAt: number
+  /** Cooperative cancellation signal — checked at file/directory boundaries. */
+  signal: AbortSignal
 }
 
 /**
@@ -104,6 +108,7 @@ async function traverseTree(
     { accountId: rootAccountId, ncPath: rootPath, cozyDir: rootCozyDir },
   ]
   while (stack.length > 0) {
+    if (ctx.signal.aborted) throw new CancellationRequestedError()
     const { accountId, ncPath, cozyDir } = stack.pop() as PendingDir
     const subdirs: PendingDir[] = []
     const entries = await ctx.stackClient.listNextcloudDir(accountId, ncPath)
@@ -150,6 +155,7 @@ async function handleFileEntry(
   cozyDirId: string,
   entry: { name: string; path: string; size: number; mime: string },
 ): Promise<void> {
+  if (ctx.signal.aborted) throw new CancellationRequestedError()
   ctx.discovered.bytesTotal += entry.size
   ctx.discovered.filesTotal += 1
 
@@ -183,6 +189,9 @@ async function handleFileEntry(
       await flush(ctx)
     }
   } catch (error) {
+    // The per-file catch is for transfer errors only — cancellation
+    // from the flush call above must propagate past it.
+    if (error instanceof CancellationRequestedError) throw error
     if (isConflictError(error)) {
       filesProcessed.inc({ outcome: 'skipped' })
       ctx.totalSkipped += 1
@@ -234,6 +243,10 @@ async function handleFileEntry(
  *   request (or the `/Nextcloud` default). Each segment is created via
  *   createDir, so existing intermediate directories are reused.
  * @param flushInterval - Flush progress to CouchDB every N files (default: 25)
+ * @param signal - Cooperative cancellation signal. Checked between
+ *   directories and between files, so an in-flight file transfer is
+ *   never interrupted. Defaults to a never-aborted signal, so existing
+ *   call sites that do not participate in cancellation still work.
  */
 export async function runMigration(
   command: MigrationCommand,
@@ -241,7 +254,8 @@ export async function runMigration(
   logger: Logger,
   bytesTotal: number,
   targetDir: string,
-  flushInterval: number = DEFAULT_FLUSH_INTERVAL
+  flushInterval: number = DEFAULT_FLUSH_INTERVAL,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<void> {
   const migrationLogger = logger.child({
     migration_id: command.migrationId,
@@ -262,6 +276,7 @@ export async function runMigration(
     filesSinceFlush: 0,
     flushInterval,
     startedAt: Date.now(),
+    signal,
   }
 
   migrationsStarted.inc()
@@ -291,6 +306,27 @@ export async function runMigration(
       total_skipped: ctx.totalSkipped,
     }, 'Migration completed')
   } catch (error) {
+    if (error instanceof CancellationRequestedError) {
+      await finalizeCancellation(ctx)
+      return
+    }
+    // A `flushAndComplete` that lost to a concurrent cancel surfaces
+    // here as `canceled -> completed`. The tracking doc is already in
+    // its rightful terminal state — don't try to re-transition it.
+    if (
+      error instanceof IllegalStatusTransitionError &&
+      error.from === 'canceled' &&
+      error.to === 'completed'
+    ) {
+      migrationsFinished.inc({ outcome: 'canceled' })
+      migrationLogger.info({
+        event: 'migration.completion_superseded_by_cancel',
+        duration_ms: Date.now() - ctx.startedAt,
+        transferred_bytes: ctx.transferred.bytes,
+        transferred_files: ctx.transferred.files,
+      }, 'Migration completion superseded by cancellation')
+      return
+    }
     const message = getErrorMessage(error)
     migrationsFinished.inc({ outcome: 'failed' })
     migrationLogger.error({
@@ -318,5 +354,42 @@ export async function runMigration(
         error: getErrorMessage(trackingError),
       }, 'Failed to update tracking doc to failed status')
     }
+  }
+}
+
+/**
+ * Terminal path for a cooperative cancellation: records the outcome
+ * metric, emits a structured summary, and flushes any pending progress
+ * into the tracking doc as it transitions to `canceled`. A failure to
+ * write the terminal state is logged but swallowed — the in-memory run
+ * is over either way and the heartbeat-recovery logic reclaims any
+ * zombie doc left behind.
+ *
+ * @param ctx - Migration context carrying the pending deltas and Stack client
+ */
+async function finalizeCancellation(ctx: MigrationContext): Promise<void> {
+  migrationsFinished.inc({ outcome: 'canceled' })
+  ctx.logger.info({
+    event: 'migration.canceled',
+    duration_ms: Date.now() - ctx.startedAt,
+    discovered_bytes: ctx.discovered.bytesTotal,
+    discovered_files: ctx.discovered.filesTotal,
+    transferred_bytes: ctx.transferred.bytes,
+    transferred_files: ctx.transferred.files,
+    total_errors: ctx.totalErrors,
+    total_skipped: ctx.totalSkipped,
+  }, 'Migration canceled')
+  try {
+    await flushAndCancel(
+      ctx.stackClient,
+      ctx.command.migrationId,
+      ctx.pending,
+      ctx.discovered.filesTotal,
+    )
+  } catch (trackingError) {
+    ctx.logger.error({
+      event: 'migration.tracking_update_failed',
+      error: getErrorMessage(trackingError),
+    }, 'Failed to update tracking doc to canceled status')
   }
 }

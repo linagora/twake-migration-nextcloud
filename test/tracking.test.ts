@@ -4,9 +4,11 @@ import {
   setRunning,
   setCompleted,
   setFailed,
+  setCancelRequested,
   flushProgress,
   flushAndComplete,
   flushAndFail,
+  flushAndCancel,
   isConflictError,
   isStaleRunning,
   STALE_HEARTBEAT_MS,
@@ -14,7 +16,9 @@ import {
   MAX_ERRORS_CAP,
   MAX_SKIPPED_CAP,
   TRACKING_SCHEMA_VERSION,
+  emptyLocalProgress,
 } from '../src/domain/tracking.js'
+import { CancellationRequestedError } from '../src/domain/errors.js'
 import type { StackClient } from '../src/clients/stack-client.js'
 import type { TrackingDoc } from '../src/domain/types.js'
 
@@ -432,6 +436,159 @@ describe('status transition guards', () => {
 
     const calledDoc = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
     expect(calledDoc.status).toBe('running')
+  })
+
+  it('setRunning refuses a canceled doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'canceled' }))
+
+    await expect(setRunning(stack, 'mig-1', 1000)).rejects.toBeInstanceOf(
+      IllegalStatusTransitionError,
+    )
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+
+  it('setCompleted refuses to overwrite a canceled doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'canceled' }))
+
+    await expect(setCompleted(stack, 'mig-1')).rejects.toBeInstanceOf(
+      IllegalStatusTransitionError,
+    )
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+
+  it('setFailed refuses to overwrite a canceled doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'canceled' }))
+
+    await expect(setFailed(stack, 'mig-1', 'late failure')).rejects.toBeInstanceOf(
+      IllegalStatusTransitionError,
+    )
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+})
+
+describe('setCancelRequested', () => {
+  it('writes the flag and canceled_at on a pending doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'pending' }))
+
+    const result = await setCancelRequested(stack, 'mig-1')
+
+    expect(result).toBe('recorded')
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.cancel_requested).toBe(true)
+    expect(typeof written.canceled_at).toBe('string')
+    expect(written.status).toBe('pending')
+    expect(written.schema_version).toBe(TRACKING_SCHEMA_VERSION)
+  })
+
+  it('writes the flag on a running doc without touching status', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'running' }))
+
+    await setCancelRequested(stack, 'mig-1')
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.status).toBe('running')
+    expect(written.cancel_requested).toBe(true)
+  })
+
+  it('is idempotent when already requested', async () => {
+    const stack = makeMockStack(
+      makeDoc({ status: 'running', cancel_requested: true, canceled_at: '2026-01-01T00:00:00Z' }),
+    )
+
+    const result = await setCancelRequested(stack, 'mig-1')
+
+    expect(result).toBe('already_requested')
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+
+  it('no-ops (without throwing) on completed / failed / canceled', async () => {
+    for (const status of ['completed', 'failed', 'canceled'] as const) {
+      const stack = makeMockStack(makeDoc({ status }))
+      const result = await setCancelRequested(stack, 'mig-1')
+      expect(result).toBe('ignored_terminal')
+      expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+    }
+  })
+})
+
+describe('flushProgress cancel checkpoint', () => {
+  it('throws CancellationRequestedError when cancel_requested is set', async () => {
+    const stack = makeMockStack(
+      makeDoc({ status: 'running', cancel_requested: true }),
+    )
+
+    await expect(
+      flushProgress(stack, 'mig-1', emptyLocalProgress(), 0),
+    ).rejects.toBeInstanceOf(CancellationRequestedError)
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+
+  it('writes normally when cancel_requested is unset', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'running' }))
+
+    await flushProgress(stack, 'mig-1', emptyLocalProgress(), 0)
+
+    expect(stack.updateTrackingDoc).toHaveBeenCalledOnce()
+  })
+})
+
+describe('flushAndCancel', () => {
+  it('transitions a running doc to canceled and flushes pending deltas', async () => {
+    const stack = makeMockStack(makeDoc({
+      status: 'running',
+      progress: { files_imported: 2, files_total: 2, bytes_imported: 1000, bytes_total: 10_000 },
+    }))
+
+    await flushAndCancel(stack, 'mig-1', {
+      bytesImported: 500, filesImported: 1, errors: [], skipped: [],
+    }, 3)
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.status).toBe('canceled')
+    expect(written.finished_at).toBeTruthy()
+    expect(written.canceled_at).toBeTruthy()
+    expect(written.failure_reason).toBe('canceled by user')
+    expect(written.progress.files_imported).toBe(3)
+    expect(written.progress.bytes_imported).toBe(1500)
+    expect(written.progress.files_total).toBe(3)
+  })
+
+  it('is a no-op on an already-canceled doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'canceled' }))
+
+    await flushAndCancel(stack, 'mig-1', emptyLocalProgress(), 0)
+
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+
+  it('refuses to overwrite a completed doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'completed' }))
+
+    await expect(
+      flushAndCancel(stack, 'mig-1', emptyLocalProgress(), 0),
+    ).rejects.toBeInstanceOf(IllegalStatusTransitionError)
+    expect(stack.updateTrackingDoc).not.toHaveBeenCalled()
+  })
+
+  it('refuses to overwrite a failed doc', async () => {
+    const stack = makeMockStack(makeDoc({ status: 'failed' }))
+
+    await expect(
+      flushAndCancel(stack, 'mig-1', emptyLocalProgress(), 0),
+    ).rejects.toBeInstanceOf(IllegalStatusTransitionError)
+  })
+
+  it('preserves an earlier canceled_at when finalising', async () => {
+    const stack = makeMockStack(makeDoc({
+      status: 'running',
+      cancel_requested: true,
+      canceled_at: '2026-04-17T10:00:00.000Z',
+    }))
+
+    await flushAndCancel(stack, 'mig-1', emptyLocalProgress(), 0)
+
+    const written = vi.mocked(stack.updateTrackingDoc).mock.calls[0][0]
+    expect(written.canceled_at).toBe('2026-04-17T10:00:00.000Z')
   })
 })
 

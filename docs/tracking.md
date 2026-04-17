@@ -12,7 +12,7 @@ The Settings UI watches this document via realtime events to show live progress.
 {
   "_id": "d4e5f6a7-b8c9-4d0e-a1b2-c3d4e5f6a7b8",
   "_rev": "5-abc123",
-  "schema_version": 1,
+  "schema_version": 2,
   "status": "running",
   "target_dir": "/Nextcloud",
   "progress": {
@@ -40,7 +40,9 @@ The Settings UI watches this document via realtime events to show live progress.
   "started_at": "2026-04-08T10:00:00Z",
   "last_heartbeat_at": "2026-04-08T10:32:20Z",
   "finished_at": null,
-  "failure_reason": null
+  "failure_reason": null,
+  "cancel_requested": false,
+  "canceled_at": null
 }
 ```
 
@@ -49,7 +51,7 @@ The Settings UI watches this document via realtime events to show live progress.
 | Field | Type | Description |
 |---|---|---|
 | `schema_version` | number | Stamped by the service on every write. Bumped when the shape changes incompatibly — consumers can key off this instead of sniffing for optional fields. |
-| `status` | string | `pending`, `running`, `completed`, or `failed` |
+| `status` | string | `pending`, `running`, `completed`, `failed`, or `canceled` |
 | `target_dir` | string | Cozy directory where files land (default: `/Nextcloud`) |
 | `progress.files_imported` | number | Files successfully transferred so far |
 | `progress.files_total` | number | Total files discovered so far. Advances monotonically — a resumed walk never regresses the value below what's already on the doc. |
@@ -62,22 +64,26 @@ The Settings UI watches this document via realtime events to show live progress.
 | `started_at` | string or null | ISO 8601 timestamp when the service started processing. Preserved across resumes — a stale-running migration that gets picked up keeps its original start time. |
 | `last_heartbeat_at` | string or null | ISO 8601 timestamp of the last progress write. Used to distinguish an actively-running migration from a zombie a crashed consumer left behind. |
 | `finished_at` | string or null | ISO 8601 timestamp when the migration reached `completed` or `failed`. |
-| `failure_reason` | string or null | Human-readable reason a migration ended in `failed`. Dual-written for now alongside a legacy `{ path: "", message, at }` sentinel inside `errors`; new consumers should prefer this field. |
+| `failure_reason` | string or null | Human-readable reason a migration ended in `failed`. Dual-written for now alongside a legacy `{ path: "", message, at }` sentinel inside `errors`; new consumers should prefer this field. Also set to `"canceled by user"` on a canceled migration, so UIs that already render it keep working without knowing about the new status. |
+| `cancel_requested` | boolean or absent | Set to `true` when the user has asked to stop the migration. A durable signal: a pending migration picked up from the queue with this flag transitions straight to `canceled` without launching, and a running migration picks it up at its next progress flush. |
+| `canceled_at` | string or null | ISO 8601 timestamp of the cancel *request* (distinct from `finished_at`, which stamps the terminal transition). Lets ops measure how long a cancel took to take effect. |
 
 ## Status transitions
 
 ```
 pending ──▶ running ──▶ completed
                    └──▶ failed
+                   └──▶ canceled
 
 pending ──▶ failed       (validation fails before the migration starts)
+pending ──▶ canceled     (cancel_requested was set before the migration started)
 failed  ──▶ running      (user retries a failed migration)
 running ──▶ running      (consumer picks up a stale running doc — see below)
 ```
 
-`completed` is terminal — nothing flips it back. `failed` allows a retry, which transitions through `running` again on the next pass.
+`completed` and `canceled` are terminal — nothing flips them back. `failed` allows a retry, which transitions through `running` again on the next pass.
 
-The service rejects illegal transitions at the write layer, so a late writer (e.g. a stale consumer that eventually finishes its run) cannot demote a newer result.
+The service rejects illegal transitions at the write layer, so a late writer (e.g. a stale consumer that eventually finishes its run) cannot demote a newer result. Notably, a `flushAndComplete` that loses a race to a concurrent cancel is swallowed silently — the canceled state is authoritative.
 
 ## Heartbeat and stale-running recovery
 

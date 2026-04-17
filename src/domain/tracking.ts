@@ -1,10 +1,11 @@
 import type { StackClient } from '../clients/stack-client.js'
 import type { TrackingDoc, TrackingError, TrackingSkipped } from './types.js'
+import { CancellationRequestedError } from './errors.js'
 
 const MAX_CONFLICT_RETRIES = 5
 
 /** Current schema version stamped on every write. */
-export const TRACKING_SCHEMA_VERSION = 1
+export const TRACKING_SCHEMA_VERSION = 2
 
 /**
  * Maximum number of entries we keep in the `errors` and `skipped`
@@ -41,13 +42,27 @@ export function isStaleRunning(doc: TrackingDoc, now: number = Date.now()): bool
 }
 
 /**
+ * @returns true when `status` is a final state that no further write
+ *   should demote. Terminal writes (`setCompleted`, `setFailed`,
+ *   `flushAndCancel`, …) use this to refuse transitions that would
+ *   overwrite a peer terminal state, and the request handler uses it
+ *   to short-circuit before launching.
+ */
+export function isTerminal(status: TrackingDoc['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'canceled'
+}
+
+/**
  * Raised when a state transition would violate the tracking-doc
  * invariants (e.g. a late writer trying to demote `completed` back
  * to `failed`). The caller typically logs and moves on — the guard
  * exists so a stale consumer cannot clobber a new run's result.
  */
 export class IllegalStatusTransitionError extends Error {
-  constructor(from: TrackingDoc['status'], to: TrackingDoc['status']) {
+  constructor(
+    public readonly from: TrackingDoc['status'],
+    public readonly to: TrackingDoc['status'],
+  ) {
     super(`Illegal tracking-doc transition: ${from} -> ${to}`)
     this.name = 'IllegalStatusTransitionError'
   }
@@ -68,10 +83,22 @@ export function isConflictError(error: unknown): boolean {
 
 /**
  * Read-modify-write with automatic retry on CouchDB 409 conflicts.
+ *
+ * Two short-circuits inside the updater:
+ * - Returning the same reference as the input doc signals an idempotent
+ *   no-op and skips the PUT entirely (saves a round trip on repeated
+ *   terminal writes).
+ * - Throwing from inside the updater (for example {@link CancellationRequestedError}
+ *   raised by `flushProgress` when it sees `cancel_requested: true`)
+ *   aborts the loop and propagates the error to the caller without
+ *   writing anything. Cancellation relies on this to piggyback its
+ *   cross-pod signal on the existing read of the tracking doc.
+ *
  * @param stackClient - Stack API client
  * @param docId - Tracking document ID
  * @param updater - Pure function that produces the updated document
- * @throws After {@link MAX_CONFLICT_RETRIES} consecutive 409s, or on any non-409 error
+ * @throws After {@link MAX_CONFLICT_RETRIES} consecutive 409s, on any
+ *   non-409 error from the Stack, or on any error thrown by `updater`.
  */
 export async function updateTracking(
   stackClient: StackClient,
@@ -112,7 +139,7 @@ export async function setRunning(
 ): Promise<void> {
   const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => {
-    if (doc.status === 'completed') {
+    if (doc.status === 'completed' || doc.status === 'canceled') {
       throw new IllegalStatusTransitionError(doc.status, 'running')
     }
     return {
@@ -141,7 +168,7 @@ export async function setCompleted(
   const finishedAt = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => {
     if (doc.status === 'completed') return doc
-    if (doc.status === 'failed') {
+    if (doc.status === 'failed' || doc.status === 'canceled') {
       throw new IllegalStatusTransitionError(doc.status, 'completed')
     }
     return {
@@ -151,6 +178,40 @@ export async function setCompleted(
       finished_at: finishedAt,
     }
   })
+}
+
+/** Outcome of {@link setCancelRequested}; doubles as the metric label. */
+export type CancelRequestOutcome = 'recorded' | 'already_requested' | 'ignored_terminal'
+
+/**
+ * Records the user's cancellation request on the tracking document.
+ * Idempotent: a second call while the flag is already set is a no-op.
+ * No-ops (with no throw) on terminal states so the cancel handler
+ * can still ACK the message without spinning the retry budget.
+ */
+export async function setCancelRequested(
+  stackClient: StackClient,
+  docId: string,
+): Promise<CancelRequestOutcome> {
+  const now = new Date().toISOString()
+  let outcome: CancelRequestOutcome = 'recorded'
+  await updateTracking(stackClient, docId, (doc) => {
+    if (isTerminal(doc.status)) {
+      outcome = 'ignored_terminal'
+      return doc
+    }
+    if (doc.cancel_requested) {
+      outcome = 'already_requested'
+      return doc
+    }
+    return {
+      ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
+      cancel_requested: true,
+      canceled_at: now,
+    }
+  })
+  return outcome
 }
 
 /**
@@ -167,7 +228,7 @@ export async function setFailed(
   const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => {
     if (doc.status === 'failed') return doc
-    if (doc.status === 'completed') {
+    if (doc.status === 'completed' || doc.status === 'canceled') {
       throw new IllegalStatusTransitionError(doc.status, 'failed')
     }
     // Dual-write: legacy sentinel in errors[] for back-compat with
@@ -229,12 +290,21 @@ export async function flushProgress(
   filesDiscovered: number
 ): Promise<void> {
   const now = new Date().toISOString()
-  await updateTracking(stackClient, docId, (doc) => ({
-    ...doc,
-    schema_version: TRACKING_SCHEMA_VERSION,
-    last_heartbeat_at: now,
-    ...mergeLocalProgress(doc, local, filesDiscovered),
-  }))
+  await updateTracking(stackClient, docId, (doc) => {
+    // Cross-pod cancel signal: another consumer (on this or any other
+    // pod) wrote `cancel_requested: true` since our last flush. The
+    // in-process AbortController covers same-pod cancels instantly;
+    // this checkpoint covers the rest.
+    if (doc.cancel_requested) {
+      throw new CancellationRequestedError()
+    }
+    return {
+      ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
+      last_heartbeat_at: now,
+      ...mergeLocalProgress(doc, local, filesDiscovered),
+    }
+  })
 }
 
 /**
@@ -262,7 +332,7 @@ export async function flushAndComplete(
   const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => {
     if (doc.status === 'completed') return doc
-    if (doc.status === 'failed') {
+    if (doc.status === 'failed' || doc.status === 'canceled') {
       throw new IllegalStatusTransitionError(doc.status, 'completed')
     }
     return {
@@ -302,7 +372,7 @@ export async function flushAndFail(
   const now = new Date().toISOString()
   await updateTracking(stackClient, docId, (doc) => {
     if (doc.status === 'failed') return doc
-    if (doc.status === 'completed') {
+    if (doc.status === 'completed' || doc.status === 'canceled') {
       throw new IllegalStatusTransitionError(doc.status, 'failed')
     }
     const merged = mergeLocalProgress(doc, local, filesDiscovered)
@@ -325,6 +395,47 @@ export async function flushAndFail(
       ...merged,
       errors: withSentinel.items,
       errors_truncated_count: withSentinel.truncated,
+    }
+  })
+}
+
+/**
+ * Atomic terminal write for the cancellation path: applies any pending
+ * progress deltas AND transitions to `canceled` in a single CouchDB
+ * round trip. Mirrors {@link flushAndComplete} and {@link flushAndFail}.
+ * Sets `failure_reason: "canceled by user"` for UIs that still parse
+ * that field alongside `status`.
+ *
+ * Refuses to transition away from a terminal state: no-op on
+ * `canceled`, throws {@link IllegalStatusTransitionError} for
+ * `completed` or `failed`.
+ *
+ * @param stackClient - Stack API client
+ * @param docId - Tracking document ID
+ * @param local - Pending deltas accumulated since the last flush
+ * @param filesDiscovered - Total files discovered during traversal
+ */
+export async function flushAndCancel(
+  stackClient: StackClient,
+  docId: string,
+  local: LocalProgress,
+  filesDiscovered: number,
+): Promise<void> {
+  const now = new Date().toISOString()
+  await updateTracking(stackClient, docId, (doc) => {
+    if (doc.status === 'canceled') return doc
+    if (doc.status === 'completed' || doc.status === 'failed') {
+      throw new IllegalStatusTransitionError(doc.status, 'canceled')
+    }
+    return {
+      ...doc,
+      schema_version: TRACKING_SCHEMA_VERSION,
+      status: 'canceled',
+      finished_at: now,
+      last_heartbeat_at: now,
+      canceled_at: doc.canceled_at ?? now,
+      failure_reason: 'canceled by user',
+      ...mergeLocalProgress(doc, local, filesDiscovered),
     }
   })
 }

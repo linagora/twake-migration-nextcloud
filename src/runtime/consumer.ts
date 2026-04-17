@@ -2,9 +2,16 @@ import type { Logger } from 'pino'
 import type { ClouderyClient } from '../clients/cloudery-client.js'
 import { createStackClient, type StackClient } from '../clients/stack-client.js'
 import { runMigration } from '../domain/migration.js'
-import { getErrorMessage } from '../domain/errors.js'
-import { isStaleRunning, setFailed } from '../domain/tracking.js'
+import { getErrorMessage, isNotFoundError } from '../domain/errors.js'
+import {
+  emptyLocalProgress,
+  flushAndCancel,
+  isStaleRunning,
+  isTerminal,
+  setFailed,
+} from '../domain/tracking.js'
 import type { MigrationCommand } from '../domain/types.js'
+import { cancelsReceived } from './metrics.js'
 import type { Config } from './config.js'
 import type { MigrationRunner } from './migration-runner.js'
 
@@ -12,16 +19,6 @@ import type { MigrationRunner } from './migration-runner.js'
 // this field at creation time, so an empty value only happens with legacy
 // docs written before target_dir was wired up.
 const DEFAULT_TARGET_DIR = '/Nextcloud'
-
-/**
- * @param error - Caught error value
- * @returns true if the error represents an HTTP 404 from the Stack
- */
-function isNotFoundError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  if ((error as { status?: number }).status === 404) return true
-  return error.message.includes('(404)')
-}
 
 /**
  * Handles a single migration message: acquires a token, validates idempotency
@@ -80,11 +77,36 @@ export async function handleMigrationMessage(
 
   const freshlyRunning =
     trackingDoc.status === 'running' && !isStaleRunning(trackingDoc)
-  if (trackingDoc.status === 'completed' || freshlyRunning) {
+  if (
+    trackingDoc.status === 'completed' ||
+    trackingDoc.status === 'canceled' ||
+    freshlyRunning
+  ) {
     migrationLogger.info({
       event: 'consumer.skipped_idempotent',
       status: trackingDoc.status,
     }, 'Migration already processed, skipping')
+    return
+  }
+  if (trackingDoc.cancel_requested) {
+    migrationLogger.info({
+      event: 'consumer.canceled_before_start',
+      status: trackingDoc.status,
+    }, 'Cancel was requested before start, transitioning to canceled')
+    try {
+      await flushAndCancel(
+        stackClient,
+        command.migrationId,
+        emptyLocalProgress(),
+        trackingDoc.progress.files_total,
+      )
+      cancelsReceived.inc({ outcome: 'pre_start' })
+    } catch (error) {
+      migrationLogger.error({
+        event: 'consumer.pre_start_cancel_failed',
+        error: getErrorMessage(error),
+      }, 'Failed to transition doc to canceled before start')
+    }
     return
   }
   if (trackingDoc.status === 'running') {
@@ -147,7 +169,7 @@ export async function handleMigrationMessage(
   // the migration in the background. The handler returns as soon as
   // the task is launched, which is also when the RabbitMQ library
   // ACKs — the slot stays held until runMigration settles.
-  await runner.run(() =>
+  await runner.run(command.migrationId, (signal) =>
     runMigration(
       command,
       stackClient,
@@ -155,6 +177,7 @@ export async function handleMigrationMessage(
       sourceSize,
       trackingDoc.target_dir || DEFAULT_TARGET_DIR,
       config.flushInterval,
+      signal,
     ).catch((error) => {
       migrationLogger.error({
         event: 'consumer.migration_unhandled_error',

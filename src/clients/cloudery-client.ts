@@ -79,6 +79,13 @@ export function createClouderyClient(
         body: JSON.stringify({
           audience: 'app',
           scope: MIGRATION_TOKEN_SCOPE,
+          // The Stack uses Subject as the slug for the permission-doc
+          // lookup that resolves an app-audience JWT into permissions.
+          // Without one, every data request fails with 404
+          // "no permission doc for ". We piggyback on the Drive app's
+          // permission doc — its scope is a superset of the doctypes
+          // this migration touches.
+          subject: 'drive',
         }),
         signal: controller.signal,
       })

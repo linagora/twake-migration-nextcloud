@@ -329,6 +329,17 @@ export function createStackClient(
         METADATA_TIMEOUT_MS,
         'getTrackingDoc',
       )
+      // cozy-stack-client swallows 404s from CouchDB (and from the
+      // Stack's own "no permission doc for" 404) and resolves to
+      // { data: null } instead of throwing. Surface that as a
+      // 404-shaped error so the consumer's existing isNotFoundError
+      // branch handles it instead of crashing on data.status.
+      if (data === null) {
+        throw Object.assign(
+          new Error(`Tracking doc not found: ${id}`),
+          { status: 404 },
+        )
+      }
       return data
     },
 

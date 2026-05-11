@@ -325,7 +325,7 @@ describe('StackClient', () => {
     })
   })
 
-  describe('token refresh on 401', () => {
+  describe('token refresh', () => {
     it('refreshes token and retries on 401 from collection', async () => {
       const entries = [{ type: 'file', name: 'a.txt', path: '/a.txt', size: 10, mime: 'text/plain' }]
       mockFind
@@ -338,6 +338,36 @@ describe('StackClient', () => {
       expect(mockCloudery.refreshToken).toHaveBeenCalledWith(FQDN)
       expect(mockSetToken).toHaveBeenCalled()
       expect(result).toEqual(entries)
+    })
+
+    // Cloudery-minted app JWTs lack session_id, so the Stack returns
+    // 400 (not 401) once their 30-minute TTL elapses.
+    it.each(['Expired token', 'Invalid token', 'Invalid JWT token'])(
+      'refreshes token and retries on 400 %j',
+      async (message) => {
+        const entries = [{ type: 'file', name: 'a.txt', path: '/a.txt', size: 1, mime: 'text/plain' }]
+        mockFind
+          .mockRejectedValueOnce(Object.assign(new Error(message), { status: 400 }))
+          .mockResolvedValueOnce({ data: entries })
+
+        const client = createStackClient(FQDN, 'https', TOKEN, mockCloudery, logger)
+        const result = await client.listNextcloudDir('acc-123', '/')
+
+        expect(mockCloudery.refreshToken).toHaveBeenCalledWith(FQDN)
+        expect(mockSetToken).toHaveBeenCalled()
+        expect(result).toEqual(entries)
+      },
+    )
+
+    it('does not refresh on unrelated 400 errors', async () => {
+      mockFind.mockRejectedValueOnce(
+        Object.assign(new Error('Bad request: something else'), { status: 400 }),
+      )
+
+      const client = createStackClient(FQDN, 'https', TOKEN, mockCloudery, logger)
+
+      await expect(client.listNextcloudDir('acc-123', '/')).rejects.toThrow('Bad request: something else')
+      expect(mockCloudery.refreshToken).not.toHaveBeenCalled()
     })
 
     it('throws after refresh + retry still fails', async () => {

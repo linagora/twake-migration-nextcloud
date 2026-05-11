@@ -43,6 +43,7 @@ function makeCommand(overrides: Partial<MigrationCommand> = {}): MigrationComman
 
 const logger = {
   info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+  isLevelEnabled: vi.fn().mockReturnValue(true),
   child: vi.fn().mockReturnThis(),
 } as unknown as Logger
 

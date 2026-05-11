@@ -128,16 +128,20 @@ async function traverseTree(
     const entries = await ctx.stackClient.listNextcloudDir(accountId, ncPath)
     ctx.dirsVisited += 1
     // Surfacing every directory is too noisy for `info` on large
-    // trees, but invaluable at `debug` when a migration looks stuck:
-    // it tells you exactly which path the walker last got a listing
-    // for, and how wide the rest of the queue is.
-    ctx.logger.debug({
-      event: 'migration.dir_visited',
-      nc_path: ncPath,
-      entries: entries.length,
-      pending_dirs: stack.length,
-      dirs_visited: ctx.dirsVisited,
-    }, 'Directory listed')
+    // trees, but invaluable at `debug` when a migration looks stuck.
+    // Gate the payload construction on the level check — pino calls
+    // are cheap once the level filter cuts them, but a 5-field object
+    // literal is still allocated on every dir visit (10k+ per
+    // migration on a node_modules-class tree) regardless of level.
+    if (ctx.logger.isLevelEnabled('debug')) {
+      ctx.logger.debug({
+        event: 'migration.dir_visited',
+        nc_path: ncPath,
+        entries: entries.length,
+        pending_dirs: stack.length,
+        dirs_visited: ctx.dirsVisited,
+      }, 'Directory listed')
+    }
     for (const entry of entries) {
       if (entry.type === 'directory') {
         try {

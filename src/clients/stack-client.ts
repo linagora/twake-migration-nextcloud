@@ -61,6 +61,33 @@ export interface DiskUsage {
 // and sidestep the missing AppToken export.
 const CozyStackClient = cozyStackClientPkg.default
 
+/**
+ * Patterns cozy-stack-client uses when translating a token-rejection
+ * response into a `FetchError.message`. The library reads the
+ * Stack's `WWW-Authenticate: Bearer error="invalid_token"` header
+ * (present on both signature/audience errors and expiry) and surfaces
+ * it as `"Invalid token"` or `"Expired token"`. We match on those
+ * strings rather than the raw header so we are tolerant of the
+ * library updating exactly which field carries the string.
+ */
+const TOKEN_REJECTION_MESSAGE = /Expired token|Invalid( JWT)? token/
+
+/**
+ * True when the Stack rejected the current JWT and a fresh one from
+ * the Cloudery is the appropriate response. Covers the obvious
+ * 401 (OAuth-style) and the less obvious 400-with-WWW-Authenticate
+ * the Stack returns for konnector-style app tokens past their
+ * 30-minute TTL.
+ */
+function shouldRefreshToken(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const status = (error as { status?: number }).status
+  if (status === 401) return true
+  if (status !== 400) return false
+  const message = (error as { message?: string }).message
+  return typeof message === 'string' && TOKEN_REJECTION_MESSAGE.test(message)
+}
+
 function toCozyDir(stat: FileStat): CozyDir {
   return { id: stat.data._id, path: stat.data.attributes.path }
 }
@@ -136,26 +163,42 @@ export function createStackClient(
   const fileCollection = cozy.collection(DOCTYPES.FILES)
 
   /**
-   * Wraps a Stack operation with 401 token refresh. On 401, fetches a new
-   * token from the Cloudery, updates the CozyStackClient, and retries once.
-   * @param operation - Async function to execute and potentially retry
-   * @returns The result of the operation
-   * @throws The original error if status is not 401, or the retry error
+   * Wraps a Stack operation with expired-token refresh. Refreshes and
+   * retries once when the Stack rejects the current token. The Stack
+   * signals token problems two ways:
+   *
+   *   - HTTP 401 — OAuth-style access token rejection.
+   *   - HTTP 400 with `WWW-Authenticate: Bearer error="invalid_token"` —
+   *     the path our app-audience JWT takes when its 30-minute TTL
+   *     elapses. The Cloudery mints the JWT with no `session_id`, so
+   *     cozy-stack's `Expired()` treats it as a konnector token rather
+   *     than a 24h app token. cozy-stack-client surfaces both flavors
+   *     (signature/audience invalid and expired) through the same
+   *     `Bearer error="invalid_token"` header and folds them into
+   *     `error.message` matching `Invalid token` or `Expired token`.
+   *
+   * Without the 400 branch a long-running migration would silently
+   * die mid-traversal once its JWT expired and the recovery
+   * `flushAndFail` write would fail for the same reason, leaving the
+   * tracking doc stuck in `running`.
+   *
+   * @throws The original error when refresh is not appropriate, or the retry error.
    */
   async function withTokenRefresh<T>(operation: () => Promise<T>): Promise<T> {
     try {
       return await operation()
     } catch (error: unknown) {
+      if (!shouldRefreshToken(error)) throw error
       const status = (error as { status?: number }).status
-      if (status === 401) {
-        logger.warn({ event: 'stack.token_refresh' }, 'Stack returned 401, refreshing token')
-        // refreshToken bypasses the Cloudery client's cache so we do not
-        // replay the same stale JWT that just got rejected.
-        const newToken = await clouderyClient.refreshToken(workplaceFqdn)
-        cozy.setToken(newToken)
-        return await operation()
-      }
-      throw error
+      logger.warn(
+        { event: 'stack.token_refresh', status },
+        'Stack rejected the token, refreshing',
+      )
+      // refreshToken bypasses the Cloudery client's cache so we do not
+      // replay the same stale JWT that just got rejected.
+      const newToken = await clouderyClient.refreshToken(workplaceFqdn)
+      cozy.setToken(newToken)
+      return await operation()
     }
   }
 

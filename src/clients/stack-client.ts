@@ -62,30 +62,28 @@ export interface DiskUsage {
 const CozyStackClient = cozyStackClientPkg.default
 
 /**
- * Patterns cozy-stack-client uses when translating a token-rejection
- * response into a `FetchError.message`. The library reads the
- * Stack's `WWW-Authenticate: Bearer error="invalid_token"` header
- * (present on both signature/audience errors and expiry) and surfaces
- * it as `"Invalid token"` or `"Expired token"`. We match on those
- * strings rather than the raw header so we are tolerant of the
- * library updating exactly which field carries the string.
+ * Strings cozy-stack-client folds into `FetchError.message` when it
+ * sees a `WWW-Authenticate: Bearer error="invalid_token"` header.
+ * Matching the message keeps us tolerant of the library updating
+ * which field actually carries the rejection signal.
  */
 const TOKEN_REJECTION_MESSAGE = /Expired token|Invalid( JWT)? token/
 
 /**
- * True when the Stack rejected the current JWT and a fresh one from
- * the Cloudery is the appropriate response. Covers the obvious
- * 401 (OAuth-style) and the less obvious 400-with-WWW-Authenticate
- * the Stack returns for konnector-style app tokens past their
- * 30-minute TTL.
+ * Returns the HTTP status if the error signals the Stack rejected
+ * the current JWT, otherwise null. Covers the obvious 401 plus the
+ * 400-with-WWW-Authenticate the Stack uses for konnector-style app
+ * tokens past their 30-minute TTL.
  */
-function shouldRefreshToken(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false
+function tokenRejectionStatus(error: unknown): number | null {
+  if (typeof error !== 'object' || error === null) return null
   const status = (error as { status?: number }).status
-  if (status === 401) return true
-  if (status !== 400) return false
-  const message = (error as { message?: string }).message
-  return typeof message === 'string' && TOKEN_REJECTION_MESSAGE.test(message)
+  if (status === 401) return 401
+  if (status === 400) {
+    const message = (error as { message?: string }).message
+    if (typeof message === 'string' && TOKEN_REJECTION_MESSAGE.test(message)) return 400
+  }
+  return null
 }
 
 function toCozyDir(stat: FileStat): CozyDir {
@@ -188,8 +186,8 @@ export function createStackClient(
     try {
       return await operation()
     } catch (error: unknown) {
-      if (!shouldRefreshToken(error)) throw error
-      const status = (error as { status?: number }).status
+      const status = tokenRejectionStatus(error)
+      if (status === null) throw error
       logger.warn(
         { event: 'stack.token_refresh', status },
         'Stack rejected the token, refreshing',

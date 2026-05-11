@@ -340,40 +340,24 @@ describe('StackClient', () => {
       expect(result).toEqual(entries)
     })
 
-    // App-audience JWTs minted by the Cloudery have no session_id, so
-    // cozy-stack treats them as konnector tokens with a 30-minute TTL.
-    // Once expired, the Stack returns HTTP 400 with a
-    // `WWW-Authenticate: Bearer error="invalid_token"` header, which
-    // cozy-stack-client surfaces as a FetchError whose .message is
-    // "Invalid token" or "Expired token". Without this branch, every
-    // migration that runs longer than ~30 minutes dies silently and
-    // the recovery flushAndFail write fails the same way.
-    it('refreshes token and retries on 400 "Expired token"', async () => {
-      const entries = [{ type: 'file', name: 'b.txt', path: '/b.txt', size: 1, mime: 'text/plain' }]
-      mockFind
-        .mockRejectedValueOnce(Object.assign(new Error('Expired token'), { status: 400 }))
-        .mockResolvedValueOnce({ data: entries })
+    // Cloudery-minted app JWTs lack session_id, so the Stack returns
+    // 400 (not 401) once their 30-minute TTL elapses.
+    it.each(['Expired token', 'Invalid token', 'Invalid JWT token'])(
+      'refreshes token and retries on 400 %j',
+      async (message) => {
+        const entries = [{ type: 'file', name: 'a.txt', path: '/a.txt', size: 1, mime: 'text/plain' }]
+        mockFind
+          .mockRejectedValueOnce(Object.assign(new Error(message), { status: 400 }))
+          .mockResolvedValueOnce({ data: entries })
 
-      const client = createStackClient(FQDN, 'https', TOKEN, mockCloudery, logger)
-      const result = await client.listNextcloudDir('acc-123', '/')
+        const client = createStackClient(FQDN, 'https', TOKEN, mockCloudery, logger)
+        const result = await client.listNextcloudDir('acc-123', '/')
 
-      expect(mockCloudery.refreshToken).toHaveBeenCalledWith(FQDN)
-      expect(mockSetToken).toHaveBeenCalled()
-      expect(result).toEqual(entries)
-    })
-
-    it('refreshes token and retries on 400 "Invalid token"', async () => {
-      const entries = [{ type: 'file', name: 'c.txt', path: '/c.txt', size: 1, mime: 'text/plain' }]
-      mockFind
-        .mockRejectedValueOnce(Object.assign(new Error('Invalid token'), { status: 400 }))
-        .mockResolvedValueOnce({ data: entries })
-
-      const client = createStackClient(FQDN, 'https', TOKEN, mockCloudery, logger)
-      const result = await client.listNextcloudDir('acc-123', '/')
-
-      expect(mockCloudery.refreshToken).toHaveBeenCalledWith(FQDN)
-      expect(result).toEqual(entries)
-    })
+        expect(mockCloudery.refreshToken).toHaveBeenCalledWith(FQDN)
+        expect(mockSetToken).toHaveBeenCalled()
+        expect(result).toEqual(entries)
+      },
+    )
 
     it('does not refresh on unrelated 400 errors', async () => {
       mockFind.mockRejectedValueOnce(

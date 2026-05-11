@@ -272,6 +272,21 @@ describe('StackClient', () => {
       expect(mockDocGet).toHaveBeenCalledWith('mig-1')
       expect(result).toEqual(doc)
     })
+
+    it('throws a 404 error when the lib swallows not_found and returns null', async () => {
+      // cozy-stack-client's Collection.get catches CouchDB's not_found
+      // (and the Stack's "no permission doc for" 404) and resolves to
+      // { data: null }. Without this guard, the consumer reads .status
+      // on null and crashes mid-handler, poisoning the rabbit retry
+      // budget.
+      mockDocGet.mockResolvedValueOnce({ data: null })
+
+      const client = createStackClient(FQDN, 'https', TOKEN, mockCloudery, logger)
+      await expect(client.getTrackingDoc('missing-id')).rejects.toMatchObject({
+        status: 404,
+        message: expect.stringContaining('missing-id'),
+      })
+    })
   })
 
   describe('updateTrackingDoc', () => {

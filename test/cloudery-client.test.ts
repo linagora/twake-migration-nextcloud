@@ -43,7 +43,7 @@ describe('ClouderyClient', () => {
         body: JSON.stringify({
           audience: 'app',
           scope: MIGRATION_TOKEN_SCOPE,
-          subject: 'drive',
+          subject: 'settings',
         }),
         signal: expect.any(AbortSignal),
       })

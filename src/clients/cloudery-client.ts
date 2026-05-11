@@ -79,13 +79,16 @@ export function createClouderyClient(
         body: JSON.stringify({
           audience: 'app',
           scope: MIGRATION_TOKEN_SCOPE,
-          // The Stack uses Subject as the slug for the permission-doc
-          // lookup that resolves an app-audience JWT into permissions.
-          // Without one, every data request fails with 404
-          // "no permission doc for ". We piggyback on the Drive app's
-          // permission doc — its scope is a superset of the doctypes
-          // this migration touches.
-          subject: 'drive',
+          // The Stack ignores the JWT's `scope` claim for app-audience
+          // tokens and authorizes every request against the permission
+          // doc of the webapp named by `subject`. We piggyback on the
+          // Settings app: it owns the migration UI and its manifest
+          // grants ALL verbs on io.cozy.nextcloud.migrations, plus the
+          // io.cozy.files and io.cozy.settings rules the rest of the
+          // migration needs. Drive's perm doc only has GET on
+          // io.cozy.nextcloud.migrations, so PUTs from setRunning /
+          // flushProgress / flushAndFail come back 403.
+          subject: 'settings',
         }),
         signal: controller.signal,
       })

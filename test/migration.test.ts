@@ -96,6 +96,56 @@ describe('runMigration', () => {
     expect(stack.transferFile).toHaveBeenCalledWith('acc-123', '/Photos/sunset.jpg', 'photos-dir')
   })
 
+  // Without this debug event a dir-only subtree (e.g. node_modules) is
+  // invisible from the outside: no info-level logs fire between
+  // `migration.started` and the first file, which looks identical to a
+  // hung walker. Operators can flip LOG_LEVEL=debug to see exactly
+  // which listing the walker last completed.
+  it('emits a migration.dir_visited debug event per directory listed', async () => {
+    const rootEntries: NextcloudEntry[] = [
+      { type: 'directory', name: 'a', path: '/a', size: 0, mime: '' },
+      { type: 'directory', name: 'b', path: '/b', size: 0, mime: '' },
+    ]
+    const stack = makeStack({
+      listNextcloudDir: vi.fn()
+        .mockResolvedValueOnce(rootEntries)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
+    })
+
+    await runMigration(makeCommand(), stack, logger, 0, '/Nextcloud')
+
+    const dirVisited = vi.mocked(logger.debug).mock.calls
+      .map((c) => c[0] as { event?: string; nc_path?: string; entries?: number })
+      .filter((entry) => entry.event === 'migration.dir_visited')
+    expect(dirVisited.map((e) => e.nc_path)).toEqual(['/', '/a', '/b'])
+    expect(dirVisited[0].entries).toBe(2)
+  })
+
+  // setInterval is not unit-tested for cadence here — the cleanup is.
+  // If clearInterval ever stops firing the timer keeps a reference to
+  // the migration logger forever, leaking memory and continuing to log
+  // after the migration ended.
+  it('clears the progress heartbeat once the migration settles', async () => {
+    vi.useFakeTimers()
+    try {
+      const stack = makeStack({
+        listNextcloudDir: vi.fn().mockResolvedValue([]),
+      })
+
+      await runMigration(makeCommand(), stack, logger, 0, '/Nextcloud')
+
+      vi.mocked(logger.info).mockClear()
+      // Fast-forward well past the heartbeat interval; nothing should fire.
+      await vi.advanceTimersByTimeAsync(120_000)
+      const progressLogs = vi.mocked(logger.info).mock.calls
+        .filter((c) => (c[0] as { event?: string }).event === 'migration.progress')
+      expect(progressLogs).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('skips files that already exist (409 on transfer) and records them', async () => {
     const entries: NextcloudEntry[] = [
       { type: 'file', name: 'exists.txt', path: '/exists.txt', size: 100, mime: 'text/plain' },

@@ -23,6 +23,14 @@ import {
 const DEFAULT_FLUSH_INTERVAL = 25
 
 /**
+ * How often `migration.progress` fires while the walker is running.
+ * Picked so an operator looking at a "stuck" migration sees fresh
+ * counters at least twice a minute, without flooding the log stream
+ * on a normal run.
+ */
+const PROGRESS_HEARTBEAT_MS = 30_000
+
+/**
  * @param targetDir - Absolute Cozy path whose usable segments are counted
  * @throws If `targetDir` has no usable segments (e.g. `""` or `"/"`)
  */
@@ -55,6 +63,12 @@ interface MigrationContext {
   discovered: { bytesTotal: number; filesTotal: number }
   /** Total transferred (cumulative, never reset). Used for logging. */
   transferred: { bytes: number; files: number }
+  /**
+   * Cumulative count of directories whose listing returned. Lets the
+   * progress heartbeat tell the difference between "walker is alive,
+   * grinding through a directory-only subtree" and "walker is wedged".
+   */
+  dirsVisited: number
   /** Local deltas accumulated since last flush. Reset after each flush. */
   pending: LocalProgress
   /** Counters for logging. */
@@ -112,6 +126,22 @@ async function traverseTree(
     const { accountId, ncPath, cozyDir } = stack.pop() as PendingDir
     const subdirs: PendingDir[] = []
     const entries = await ctx.stackClient.listNextcloudDir(accountId, ncPath)
+    ctx.dirsVisited += 1
+    // Surfacing every directory is too noisy for `info` on large
+    // trees, but invaluable at `debug` when a migration looks stuck.
+    // Gate the payload construction on the level check — pino calls
+    // are cheap once the level filter cuts them, but a 5-field object
+    // literal is still allocated on every dir visit (10k+ per
+    // migration on a node_modules-class tree) regardless of level.
+    if (ctx.logger.isLevelEnabled('debug')) {
+      ctx.logger.debug({
+        event: 'migration.dir_visited',
+        nc_path: ncPath,
+        entries: entries.length,
+        pending_dirs: stack.length,
+        dirs_visited: ctx.dirsVisited,
+      }, 'Directory listed')
+    }
     for (const entry of entries) {
       if (entry.type === 'directory') {
         try {
@@ -270,6 +300,7 @@ export async function runMigration(
     logger: migrationLogger,
     discovered: { bytesTotal: 0, filesTotal: 0 },
     transferred: { bytes: 0, files: 0 },
+    dirsVisited: 0,
     pending: emptyLocalProgress(),
     totalErrors: 0,
     totalSkipped: 0,
@@ -278,6 +309,25 @@ export async function runMigration(
     startedAt: Date.now(),
     signal,
   }
+
+  // Heartbeat is independent of file activity: deep dir-only subtrees
+  // (think `node_modules`) can produce no per-file event for many
+  // minutes, leaving operators with no way to tell a slow walker from
+  // a wedged one. The setInterval timer fires whenever the event loop
+  // is idle, so a truly-stuck process still goes silent — and that is
+  // itself a useful signal.
+  const heartbeat = setInterval(() => {
+    migrationLogger.info({
+      event: 'migration.progress',
+      elapsed_ms: Date.now() - ctx.startedAt,
+      dirs_visited: ctx.dirsVisited,
+      discovered_files: ctx.discovered.filesTotal,
+      transferred_files: ctx.transferred.files,
+      transferred_bytes: ctx.transferred.bytes,
+      total_errors: ctx.totalErrors,
+      total_skipped: ctx.totalSkipped,
+    }, 'Migration progress')
+  }, PROGRESS_HEARTBEAT_MS)
 
   migrationsStarted.inc()
   try {
@@ -354,6 +404,8 @@ export async function runMigration(
         error: getErrorMessage(trackingError),
       }, 'Failed to update tracking doc to failed status')
     }
+  } finally {
+    clearInterval(heartbeat)
   }
 }
 
